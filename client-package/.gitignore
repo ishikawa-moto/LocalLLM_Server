@@ -1,0 +1,5 @@
+certs/client.pfx
+certs/*-key.pem
+client-config.json
+dotnet/**/bin/
+dotnet/**/obj/

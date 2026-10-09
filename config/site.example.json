@@ -1,0 +1,27 @@
+{
+  "server_address": "__SERVER_HOST__",
+  "client_address": "__CLIENT_HOST__",
+  "chat_allowed_subnets": [
+    "__LOOPBACK_SUBNET__",
+    "__LAN_SUBNET__"
+  ],
+  "chat_allowed_hosts": [
+    "__LOOPBACK_HOST__:__CHAT_PORT__",
+    "localhost:__CHAT_PORT__",
+    "__SERVER_HOST__:__CHAT_PORT__"
+  ],
+  "host_owner": "ClientPC-windows-host",
+  "client_record_prefix": "ClientPC-",
+  "application_source": "ClientPC",
+  "host_approval_model": "authenticated-ClientPC-host-attestation-v1",
+  "gateway_firewall_name": "LocalBrain Gateway from ClientPC",
+  "temporary_transfer_firewall_name": "LocalBrain temporary client transfer from ClientPC",
+  "llm_port": "__LLM_PORT__",
+  "proxy_port": "__PROXY_PORT__",
+  "chat_port": "__CHAT_PORT__",
+  "brain_port": "__BRAIN_PORT__",
+  "embedding_port": "__EMBEDDING_PORT__",
+  "gateway_port": "__GATEWAY_PORT__",
+  "bridge_port": "__BRIDGE_PORT__",
+  "smb_port": "__SMB_PORT__"
+}

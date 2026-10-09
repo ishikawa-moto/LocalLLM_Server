@@ -1,0 +1,94 @@
+# BEGIN LocalBrain GitHub exclusions
+# LocalBrain server: real configuration and credentials
+/config/*
+!/config/*.template.json
+!/config/*.example.json
+!/config/*.template.yaml
+!/config/*.example.yaml
+!/config/README*
+/certs/
+/.env*
+!/.env.example
+!/.env.template
+*.pfx
+*.p12
+*.key
+*-key.pem
+*_key.pem
+key.pem
+private.pem
+api-keys.json
+api-key.json
+secrets.json
+auth.json
+
+# Personal knowledge, documents, chats and service state
+/SecondBrain/
+/raw/
+/wiki/
+/drafts/
+/knowledge/
+/data/
+/chats/
+/chatlogs/
+/runtime/
+/logs/
+/backups/
+/backup/
+/imports/
+/exports/
+/cache/
+/.localbrain/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.log
+*.bak
+*.bak.*
+*.tmp
+*.dmp
+
+# Model weights and downloaded/compiled runtimes
+/models/
+*.gguf
+*.GGUF
+*.safetensors
+*.onnx
+*.exe
+*.dll
+*.pdb
+*.zip
+*.7z
+*.tar.gz
+*.whl
+**/bin/
+**/obj/
+dist/
+build/
+
+# Dependency and tool caches
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+coverage/
+.vs/
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+Desktop.ini
+# END LocalBrain GitHub exclusions
+
+# Dedicated local-provider Codex settings and session state
+/codex-home/
+
+# Local originals containing personal or deployment information
+private-*

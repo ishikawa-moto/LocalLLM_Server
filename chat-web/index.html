@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LocalBrain Chat</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><aside><h1>LocalBrain <span>Chat</span></h1><button id="new">＋ 新しいChat</button><nav id="chats" aria-label="会話一覧"></nav><small>ServerPC · LAN<br>履歴はLAN内の全ブラウザで共通<br>SecondBrainへ自動保存しません</small></aside>
+<main><header><strong id="title">新しいChat</strong><button id="delete" type="button" disabled>このChatを削除</button><label><input id="brain" type="checkbox" checked> SecondBrain ON</label></header><div id="messages" role="log" aria-live="polite"><div class="welcome"><h2>今日は何を話しましょう？</h2><p>SecondBrainの知識を参考に、会話できます。</p></div></div><footer><div id="status" role="status">接続中…</div><div id="details"></div><form id="form"><textarea id="prompt" rows="3" placeholder="メッセージを入力…" aria-label="メッセージ" required></textarea><div class="actions"><small>Ctrl / ⌘ + Enter で送信</small><button id="stop" type="button" disabled>停止</button><button id="send" type="submit">送信</button></div></form><p class="hint">回答には誤りや古い情報が含まれる場合があります。</p></footer></main></body></html>
+
+
