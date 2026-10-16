@@ -190,7 +190,7 @@ class ApplyEngine:
         """Read/write/recovery use the same canonical, non-reparse runtime path."""
         parts = relative.split('/')
         require(parts[0] in ('proposal-bindings','proposal-adoptions','approval-consumptions',
-                            'apply-transactions','apply-results','apply-claims'))
+                            'apply-transactions','apply-results','apply-claims','decision-reviews'))
         require(all(p not in ('','.','..') and re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',p) for p in parts),
                 'invalid_path','Invalid runtime path.')
         path = self.brain.runtime
@@ -306,6 +306,9 @@ class ApplyEngine:
                 and client.get('approval_owner') == HOST_OWNER,
                 'host_attestation_required', 'ClientPC authenticated Host attestation is required.', 403)
         approval = payload['approval']
+        if isinstance(approval,dict) and approval.get('version')==3:
+            from decision_review import validate_automatic_approval
+            return validate_automatic_approval(self.brain,operation,payload,client)
         keys = {'version','owner','approval_id','task_id','request_id','operation',
                 'proposal_id','proposal_hash','decision_hash','issued_at','expires_at','provenance'}
         require(isinstance(approval,dict) and set(approval) == keys)
@@ -377,7 +380,8 @@ class ApplyEngine:
                 'source_path':ref['path'], 'source_hash':record['expected_hash'],
                 'source_type':record['metadata'].get('source_type', 'knowledge'),
                 'source_date':record['metadata'].get('source_date'), 'retrieved_at':stamp,
-                'knowledge_type':record['metadata'].get('knowledge_type', 'SOURCE'), 'confidence':'human-approved'})
+                'knowledge_type':record['metadata'].get('knowledge_type', 'SOURCE'),
+                'confidence':('human-reaffirmed-unverified' if approval['provenance']=='human-reaffirmed-returned-decision' else 'reviewer-approved') if approval and approval.get('version')==3 else 'human-approved'})
         if operation == 'supersede':
             old = self.target(payload['old'], project); new = self.target(payload['new'], project)
             require(old['path'].casefold() != new['path'].casefold(), 'same_target', 'Old and new must differ.')
@@ -413,6 +417,15 @@ class ApplyEngine:
                 if proposal:
                     metadata.update(origin_proposal_id=proposal['proposal_id'],
                                     expected_proposal_hash=proposal['proposal_hash'])
+            if approval and approval.get('version')==3:
+                from decision_review import DecisionReviewer
+                review=DecisionReviewer(self.brain).read_record(payload['origin_proposal_id'])
+                reaffirmed=approval['provenance']=='human-reaffirmed-returned-decision'
+                metadata.update(approval_model='authenticated-host-reviewer-policy-v1', evidence_level='unknown' if reaffirmed else 'inferred',
+                                review_state='human_reaffirmed_with_issues' if reaffirmed else 'reviewer_approved',
+                                verification_status='unverified_user_assertion' if reaffirmed else 'source_grounded_review',
+                                do_not_treat_as_fact=reaffirmed,human_identity_verification='native-host-reaffirmation-attested' if reaffirmed else 'not applicable: Reviewer policy',review_receipt_hash=approval['review_receipt_hash'],review_issues=review['issues'],
+                                human_reaffirmation_receipt_hash=approval['reaffirmation_receipt_hash'])
             if operation == 'merge':
                 metadata['merged_from'] = [{k:r[k] for k in ('path', 'expected_hash', 'expected_metadata_hash')} for r in sources]
                 metadata['inherited_provenance'] = [{'path':r['path'], 'metadata':r['metadata']} for r in sources]
@@ -441,6 +454,13 @@ class ApplyEngine:
             audit.update(approval_model=HOST_APPROVAL_MODEL, host_approval=approval,
                          human_identity_verification='not independently verified by ServerPC',
                          origin_proposal_id=proposal['proposal_id'] if proposal else None)
+            if approval.get('version')==3:
+                audit.update(approval_model=metadata['approval_model'],
+                             human_identity_verification=metadata['human_identity_verification'],
+                             review_state=metadata['review_state'],verification_status=metadata['verification_status'],
+                             do_not_treat_as_fact=metadata['do_not_treat_as_fact'],
+                             review_receipt_hash=approval['review_receipt_hash'],
+                             reaffirmation_receipt_hash=approval['reaffirmation_receipt_hash'])
         writes['log/apply/'+audit_id+'.json'] = encoded(audit)
         return writes, destination, audit
 

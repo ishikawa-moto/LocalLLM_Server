@@ -478,7 +478,7 @@ class Handler(BaseHTTPRequestHandler):
                         "/v1/brain/get":"/get", "/brain/get":"/get", "/v1/brain/find-decisions":"/search", "/v1/brain/find-incidents":"/search",
                         "/v1/brain/find-entity":"/find-entity", "/v1/brain/find-concept":"/find-concept", "/v1/brain/find-synthesis":"/find-synthesis",
                         "/v1/brain/sources":"/sources", "/v1/brain/history":"/history", "/v1/brain/superseded":"/superseded",
-                        "/v1/brain/proposal":"/proposal", "/v1/brain/propose-bound-decision":"/propose-bound-decision",
+                        "/v1/brain/decision-review-register":"/decision-review/register", "/v1/brain/decision-review-status":"/decision-review/status", "/v1/brain/proposal":"/proposal", "/v1/brain/propose-bound-decision":"/propose-bound-decision",
                          "/v1/brain/proposals":"/propose", "/brain/propose":"/propose", "/v1/brain/propose-decision":"/propose",
                         "/v1/brain/propose-merge":"/propose", "/v1/brain/propose-supersede":"/propose"}
         if self.path in brain_routes:
@@ -504,9 +504,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not explicit_id: raise ValueError("Critic requires X-LocalBrain-Request-Id")
                 validate_critic_prompt(path, body)
             keys = load_internal_keys()
-            token = keys["llm"] if model else (keys["propose"] if path in ("/propose","/propose-bound-decision") or path.startswith("/apply/") else keys["read"])
+            token = keys["llm"] if model else (keys["propose"] if path in ("/propose","/propose-bound-decision","/decision-review/register") or path.startswith("/apply/") else keys["read"])
             headers = {"Authorization":"Bearer "+token, "X-LocalBrain-Request-Id":request_id, "Content-Length":str(len(body))}
-            if path.startswith("/apply/"):
+            if path.startswith("/apply/") or path == "/decision-review/register":
                 import hashlib
                 headers["X-LocalBrain-Apply-Client"] = self.client_address[0]
                 if self.headers.get("X-LocalBrain-Approval-Owner") == APPROVAL_OWNER:

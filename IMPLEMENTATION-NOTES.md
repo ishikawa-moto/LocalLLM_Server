@@ -43,6 +43,6 @@
 - ChatGPT migration: 48 immutable raw sources created, 48 legacy entries retained as superseded; immediate rerun created 0 and reported 48 duplicates.
 - Local librarian live test: 3 direct-source FACTs promoted, SYNTHESIS retained as draft, untrusted AI-source FACT candidates aggregated into one review draft, ungrounded DECISION candidates rejected.
 - Current index: hybrid, 111 documents, 23,405 chunks/vectors, no stale source and no index error.
-- Final backup: `F:\LocalBrainBackups\LocalBrain-20260914-065124.zip`, SHA-256 `03C96954376452AF9AFE514F0787E7C470E773A6F3AEEBCC0C367870DC41A48B`; credentials, quarantine, models, derived indexes, caches, and service logs excluded.
+- Final backup: `G:\LocalBrain-Backups\Server-snapshots\LocalBrain-20260914-065124.zip`, SHA-256 `03C96954376452AF9AFE514F0787E7C470E773A6F3AEEBCC0C367870DC41A48B`; credentials, quarantine, models, derived indexes, caches, and service logs excluded.
 
 Remaining machine-bound steps are the one-time elevated ServerPC Scheduled Task/firewall installation and running the encrypted client package installer on ClientPC. They require the interactive Windows user and cannot be completed by the non-administrator service process.

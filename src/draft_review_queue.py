@@ -8,7 +8,8 @@ import subprocess
 import sys
 import time
 
-from draft_review import DraftReviewer, GatewayJudge, ReviewLease
+from draft_review import GatewayJudge, ReviewLease
+from decision_review import CombinedReviewer as DraftReviewer
 from knowledge_guard import guard
 from knowledge_pipeline import atomic_json
 

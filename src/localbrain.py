@@ -365,11 +365,23 @@ def serve(brain,port=site_port('brain')):
                 if self.headers.get('Transfer-Encoding'): return self.send(400,{'error':'Transfer encoding unsupported'})
                 size=int(self.headers.get('Content-Length','0'))
                 if size<=0 or size>250_000: return self.send(413,{'error':'Invalid request size'})
-                role='propose' if self.path in ('/propose','/propose-bound-decision') or self.path.startswith('/apply/') else 'read'
+                role='propose' if self.path in ('/propose','/propose-bound-decision','/decision-review/register') or self.path.startswith('/apply/') else 'read'
                 token=self.headers.get('Authorization','').removeprefix('Bearer ')
                 if not hmac.compare_digest(token,brain.keys[role]): return self.send(401,{'error':'Unauthorized'})
                 value=json.loads(self.rfile.read(size))
                 if not isinstance(value,dict): raise ValueError('Object required')
+                if self.path in ('/decision-review/register','/decision-review/status'):
+                    from decision_review import DecisionReviewer
+                    reviewer=DecisionReviewer(brain)
+                    if self.path.endswith('/status'):
+                        if set(value)!={'proposal_id'}:raise ValueError('proposal_id only')
+                        return self.send(200,reviewer.status(value['proposal_id']))
+                    if set(value)!={'proposal_id','request_mode','host_policy_hash','task_id','workspace_id'}:raise ValueError('Exact owned registration schema required')
+                    client={'source':('mTLS Gateway / trusted Continue approval' if self.headers.get('X-LocalBrain-Apply-Certificate') else 'trusted loopback credential'),
+                            'address':self.headers.get('X-LocalBrain-Apply-Client','trusted-loopback'),
+                            'certificate_sha256':self.headers.get('X-LocalBrain-Apply-Certificate',''),
+                            'approval_owner':self.headers.get('X-LocalBrain-Approval-Owner','')}
+                    return self.send(200,reviewer.register(**value,client=client))
                 if self.path.startswith('/apply/'):
                     from approved_apply import ApplyEngine
                     operation = self.path.removeprefix('/apply/')

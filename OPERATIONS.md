@@ -59,7 +59,7 @@ Get-Content .\logs\stability-current.json -Raw
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe .\src\backup.py F:\LocalBrainBackups
+.\.venv\Scripts\python.exe .\src\backup.py G:\LocalBrain-Backups\Server-snapshots
 ```
 
 バックアップは秘密情報、モデル、派生index、cache、logを含みません。復旧時はGatewayを停止し、ZIPのmanifestを検証してからコードとSecondBrain原本を戻し、`IndexBrain`で派生indexを再作成します。
