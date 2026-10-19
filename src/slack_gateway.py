@@ -143,7 +143,15 @@ class LoopbackModel:
                 data = line[5:].strip()
                 if data == b'[DONE]': done = True; break
                 value = strict_json(data)
-                part = value.get('choices', [{}])[0].get('delta', {}).get('content', '')
+                choices = value.get('choices')
+                if not isinstance(choices, list): raise ValueError('invalid model stream')
+                # Role/finish/usage events are valid SSE metadata, not answer text.
+                if not choices: continue
+                if len(choices) != 1 or not isinstance(choices[0], dict): raise ValueError('invalid model stream')
+                delta = choices[0].get('delta', {})
+                if not isinstance(delta, dict): raise ValueError('invalid model stream')
+                part = delta.get('content')
+                if part is None: continue
                 if not isinstance(part, str): raise ValueError('invalid model stream')
                 result.append(part)
                 if sum(len(x.encode('utf-8')) for x in result) > 32768: raise ValueError('oversize output')
