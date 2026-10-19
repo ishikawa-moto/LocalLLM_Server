@@ -130,6 +130,7 @@ class LifecycleController:
         self.condition = threading.Condition(threading.RLock())
         self.inference = threading.Semaphore(1)
         self.state = ModelState.READY if health(site_port('llm')) else ModelState.STOPPED
+        self.background = None
         self.active_jobs = 0
         self.queued_jobs = 0
         self.inflight_ids: set[str] = set()
@@ -283,6 +284,11 @@ class LifecycleController:
             try: self._record(request_id, role, "queued", new=True)
             except sqlite3.IntegrityError: raise RuntimeError("duplicate request ID") from None
             self.inflight_ids.add(request_id); self.queued_jobs += 1; self.last_model_request = self.clock()
+            # Admission and background cancellation share the same lock. A new
+            # low-priority request cannot overtake an admitted foreground request.
+            background = self.background
+            if background is not None: background.cancelled.set()
+        if background is not None: background.abort()
         self.audit("request_queued", request_id=request_id, **(metadata or {}))
         acquired = False; active_started = False
         terminal = "failed"
@@ -323,6 +329,48 @@ class LifecycleController:
             finally:
                 if acquired: self.inference.release()
             if active_started: self.audit("request_finished", request_id=request_id)
+
+    @contextlib.contextmanager
+    def background_job(self, priority):
+        """Fail-fast admission on the *same* inference semaphore; never starts Qwen."""
+        from slack_gateway import Deferred, Lease
+        previous = None
+        with self.condition:
+            if self.background is not None and priority < self.background.priority:
+                previous = self.background
+                previous.cancelled.set()
+            admitted = (previous is None and self.background is None
+                        and self.active_jobs == 0 and self.queued_jobs == 0
+                        and self.state == ModelState.READY and self.health(site_port('llm'))
+                        and self.inference.acquire(blocking=False))
+            if admitted:
+                lease = Lease(priority)
+                self.background = lease
+                self.active_jobs += 1
+                self.state = ModelState.BUSY
+                # Slack source/request/session identifiers never enter normal telemetry.
+                self.active_task = {"role": "restricted-background"}
+        if previous is not None: previous.abort()
+        if not admitted: raise Deferred()
+        try:
+            yield lease
+            lease.check()
+        finally:
+            try:
+                lease.abort()
+            finally:
+                with self.condition:
+                    self.background = None
+                    self.active_jobs -= 1
+                    self.active_task = None
+                    self.last_model_request = self.clock()
+                    try:
+                        self.state = ModelState.READY if self.health(site_port('llm')) else ModelState.STOPPED
+                    except Exception:
+                        self.state = ModelState.FAILED
+                    finally:
+                        self.inference.release()
+                        self.condition.notify_all()
 
     def idle_once(self) -> bool:
         with self.condition:
@@ -401,7 +449,10 @@ def validate_critic_prompt(path: str, body: bytes) -> None:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"; server_version = "LocalBrainGateway/2"
-    def log_message(self, fmt, *args): print(f"{self.client_address[0]} {fmt % args}", flush=True)
+    def log_message(self, fmt, *args):
+        # Do not put restricted route/query identifiers into ordinary access logs.
+        if self.path.startswith("/v1/slack"): return
+        print(f"{self.client_address[0]} {fmt % args}", flush=True)
     def allowed(self) -> bool:
         cert = self.connection.getpeercert(); allowed = self.client_address[0] in CONFIG.allowed_ips and bool(cert)
         if not allowed: audit("authentication_failure", source_ip=self.client_address[0], certificate_present=bool(cert))
@@ -418,6 +469,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(size) if size else b""
     def do_GET(self):
         if not self.allowed(): return self.send_json(403, {"error": "client denied"})
+        if self.path.startswith("/v1/slack"): return self.slack_request()
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/v1/control/job-status":
             request_ids = urllib.parse.parse_qs(parsed.query).get("request_id", [])
@@ -437,6 +489,9 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(404, {"error": "endpoint not found"})
     def do_POST(self):
         if not self.allowed(): return self.send_json(403, {"error": "client denied"})
+        if self.path.startswith("/v1/slack"): return self.slack_request()
+        if self.headers.get("X-LocalBrain-Data-Class") == "slack_restricted":
+            return self.send_json(403, {"error":"restricted_route_required"})
         if self.path == "/v1/control/cancel":
             try:
                 value = json.loads(self.body())
@@ -490,6 +545,29 @@ class Handler(BaseHTTPRequestHandler):
                 value=json.loads(body or b"{}"); value["kind"]=proposal_kinds[self.path]; body=json.dumps(value).encode()
             return self.proxy_internal(site_port('brain'), brain_routes[self.path], model=False, body=body)
         return self.send_json(404, {"error":"endpoint not found"})
+    def slack_request(self):
+        from slack_gateway import SlackError, strict_json
+        service = getattr(self.server, "slack_service", None)
+        if service is None: return self.send_json(503, {"status":"disabled"})
+        try:
+            service.authenticate(self.client_address[0], self.connection.getpeercert(binary_form=True),
+                                 self.headers.get("X-LocalBrain-Approval-Owner"))
+            if self.command == "GET" and self.path == "/v1/slack/capabilities":
+                return self.send_json(200, service.capabilities())
+            if self.command != "POST" or self.path not in service.POST_ROUTES:
+                return self.send_json(404, {"error":"endpoint_not_found"})
+            lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get("Transfer-Encoding") or len(lengths) != 1: raise SlackError("invalid_framing")
+            size = int(lengths[0])
+            if not 0 < size <= 65536: raise SlackError("request_too_large", 413)
+            self.connection.settimeout(10)
+            data = self.rfile.read(size)
+            if len(data) != size: raise SlackError("invalid_framing")
+            return self.send_json(200, service.dispatch(self.path, strict_json(data)))
+        except SlackError as exc: return self.send_json(exc.http, {"error":exc.code})
+        except (ValueError, UnicodeError): return self.send_json(400, {"error":"invalid_json"})
+        except Exception: return self.send_json(503, {"error":"restricted_request_failed"})
+
     def proxy_internal(self, port: int, path: str, model: bool, body: bytes | None = None, critic: bool = False):
         explicit_id = self.headers.get("X-LocalBrain-Request-Id")
         request_id = explicit_id or str(uuid.uuid4())
@@ -498,6 +576,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not REQUEST_ID.fullmatch(request_id): return self.send_json(400, {"error":"invalid request ID"})
             if body is None: body = self.body()
+            # Defense in depth for explicitly classified envelopes. Missing labels
+            # cannot be inferred; the authenticated Host must enforce egress context.
+            from slack_gateway import contains_restriction
+            try: classified = contains_restriction(json.loads(body)) if body else False
+            except (ValueError, UnicodeError): classified = False
+            if classified: return self.send_json(403, {"error":"restricted_route_required"})
             metadata = request_metadata(self.headers) if model else {}
             role = "critic" if critic else ("actor" if model else None)
             if critic:
@@ -572,6 +656,10 @@ def main() -> None:
     global CONTROLLER
     CONTROLLER = LifecycleController(CONFIG, journal_path=JOBS)
     server = ThreadingHTTPServer((ANY_ADDRESS, CONFIG.port), Handler); server.daemon_threads = True
+    from slack_gateway import SlackService, LoopbackModel
+    server.slack_service = SlackService.from_root(ROOT, CONTROLLER, LoopbackModel(
+        LOOPBACK, site_port('llm'), lambda: load_internal_keys()['llm']),
+        site_value("client_address", "localbrain-client", ROOT), APPROVAL_OWNER)
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH); context.load_cert_chain(TLS / "server.pem", TLS / "server-key.pem")
     context.load_verify_locations(TLS / "ca.pem"); context.verify_mode = ssl.CERT_REQUIRED; server.socket = context.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=idle_watch, daemon=True).start(); threading.Thread(target=CONTROLLER.ensure_base, daemon=True).start()

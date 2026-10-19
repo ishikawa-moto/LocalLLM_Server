@@ -1,0 +1,5 @@
+{
+  "enabled": false,
+  "host_certificate_sha256": "__CLIENT_HOST_CERTIFICATE_SHA256__",
+  "human_apply_enabled": false
+}

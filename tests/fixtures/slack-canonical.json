@@ -1,0 +1,14 @@
+{
+  "value": {
+    "schema": "localbrain.slack-canonical-fixture.v1",
+    "source": "日本語 😀\n<&/>",
+    "restriction": {
+      "origin": "slack",
+      "dataClass": "slack_restricted",
+      "externalAi": "deny",
+      "cloudFallback": false
+    }
+  },
+  "canonical_utf8": "{\"restriction\":{\"cloudFallback\":false,\"dataClass\":\"slack_restricted\",\"externalAi\":\"deny\",\"origin\":\"slack\"},\"schema\":\"localbrain.slack-canonical-fixture.v1\",\"source\":\"日本語 😀\\n<&/>\"}",
+  "sha256": "7c08ebfad1ecc4780127952d36fab5a0ab542eb2c5f8d9cb3aa945ce12c4f341"
+}
