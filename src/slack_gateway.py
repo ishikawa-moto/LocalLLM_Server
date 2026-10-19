@@ -156,17 +156,20 @@ class RestrictedStore:
     """Separate database, never indexed/exported by normal Brain/TaskMemory paths."""
     def __init__(self, root): self.path = Path(root)/'runtime'/'slack-restricted'/'state.sqlite3'
     @contextlib.contextmanager
-    def db(self):
+    def db(self, timeout=5):
         # Do not follow junctions/symlinks into a normal knowledge or external tree.
         for p in (self.path, *self.path.parents):
             if p.exists():
                 info = p.lstat()
                 require(not p.is_symlink() and not (getattr(info, 'st_file_attributes', 0) & 0x400), 'unsafe_storage', 503)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path, timeout=5)
+        db = sqlite3.connect(self.path, timeout=timeout)
         try:
             db.execute('PRAGMA synchronous=FULL')
             db.executescript('''
+              CREATE TABLE IF NOT EXISTS retired_ids(kind TEXT NOT NULL, id TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY(kind,id));
+              CREATE TABLE IF NOT EXISTS retired_sessions(session_id TEXT PRIMARY KEY, retired_at INTEGER NOT NULL);
+              CREATE TABLE IF NOT EXISTS retirements(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, result TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT, session_id TEXT NOT NULL, operation TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, nonce TEXT UNIQUE NOT NULL, request_id TEXT UNIQUE NOT NULL, hash TEXT NOT NULL, result TEXT NOT NULL);
@@ -176,8 +179,16 @@ class RestrictedStore:
             require({r[1] for r in db.execute('PRAGMA table_info(runs)')} == {'id','hash','state','result','session_id','operation'}, 'restricted_schema_mismatch', 503)
             with db: yield db
         finally: db.close()
-    def existing(self, request_id, request_hash):
+    @staticmethod
+    def require_open(db, session_id):
+        require(db.execute('SELECT 1 FROM retired_sessions WHERE session_id=?', (session_id,)).fetchone() is None, 'session_retired', 409)
+    @staticmethod
+    def require_fresh(db, kind, opaque_id):
+        require(db.execute('SELECT 1 FROM retired_ids WHERE kind=? AND id=?', (kind, opaque_id)).fetchone() is None, kind+'_retired', 409)
+    def existing(self, request_id, request_hash, session_id):
         with self.db() as db:
+            self.require_open(db, session_id)
+            self.require_fresh(db, 'request', request_id)
             row = db.execute('SELECT hash,state,result FROM runs WHERE id=?', (request_id,)).fetchone()
         if row is None: return None
         require(hmac.compare_digest(row[0], request_hash), 'request_id_conflict', 409)
@@ -185,6 +196,9 @@ class RestrictedStore:
         return dict(status='interrupted', retry_safe=False)
     def reserve(self, request_id, request_hash, session_id, operation='chat'):
         with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.require_open(db, session_id)
+            self.require_fresh(db, 'request', request_id)
             try: db.execute('INSERT INTO runs VALUES (?,?,?,NULL,?,?)', (request_id, request_hash, 'active', session_id, operation))
             except sqlite3.IntegrityError: raise SlackError('request_already_reserved', 409) from None
     def finish(self, request_id, value):
@@ -193,12 +207,13 @@ class RestrictedStore:
             db.execute('UPDATE runs SET state=?,result=? WHERE id=?', (state, canonical(value).decode(), request_id))
 
 class SlackService:
-    POST_ROUTES = {'/v1/slack/chat', '/v1/slack/review', '/v1/slack/proposal', '/v1/slack/apply', '/v1/slack/cancel', '/v1/slack/status'}
+    POST_ROUTES = {'/v1/slack/chat', '/v1/slack/review', '/v1/slack/proposal', '/v1/slack/apply', '/v1/slack/cancel', '/v1/slack/status', '/v1/slack/retire'}
     def __init__(self, root, controller, model, client_ip, owner, policy, clock=time.time):
         self.controller, self.model, self.client_ip, self.owner = controller, model, client_ip, owner
         self.policy, self.clock = policy, clock
         self.store = RestrictedStore(root)
         self.active, self.lock = {}, threading.Lock()
+        self.applications = {}
     @classmethod
     def from_root(cls, root, controller, model, client_ip, owner):
         policy = {}
@@ -219,7 +234,7 @@ class SlackService:
     def capabilities(self):
         enabled = self.policy.get('enabled') is True
         return dict(schema='localbrain.slack-capabilities.v1', enabled=enabled, chat=enabled, review=enabled,
-                    restricted_proposal=enabled, human_restricted_adoption=enabled and self.policy.get('human_apply_enabled') is True,
+                    session_retirement=enabled, restricted_proposal=enabled, human_restricted_adoption=enabled and self.policy.get('human_apply_enabled') is True,
                     ordinary_secondbrain_adoption=False, automatic_adoption=False, rule_proposal=enabled,
                     rule_activation=enabled and self.policy.get('human_apply_enabled') is True, rule_targets=[RULE_TARGET], rule_values=RULE_VALUES,
                     external_ai=False, cloud_fallback=False, model_cold_start=False, max_concurrency=1,
@@ -235,6 +250,7 @@ class SlackService:
         if action == 'proposal': return self.proposal(value)
         if action == 'apply': return self.apply(value)
         if action == 'status': return self.status(value)
+        if action == 'retire': return self.retire(value)
         if action == 'cancel':
             fields(value, ('request_id', 'session_id', 'restriction'))
             require(safe_id(value['request_id']) and safe_id(value['session_id']))
@@ -255,21 +271,25 @@ class SlackService:
         else: source = text(value['source'])
         require(len(source.encode('utf-8')) <= 16000, 'input_budget_exceeded', 413)
         request_hash = digest(dict(action=action, value=value))
-        previous = self.store.existing(value['request_id'], request_hash)
+        previous = self.store.existing(value['request_id'], request_hash, value['session_id'])
         if previous is not None: return previous
         limit = min(value['max_tokens'], 1024)
         timeout = min(value['timeout_seconds'], 30 if action == 'chat' else 60)
         end, reserved = time.monotonic()+timeout, False
         cancellation = RunCancellation()
         record = dict(status='interrupted', retry_safe=False)
+        registered = False
         try:
+            with self.lock:
+                require(value['request_id'] not in self.active, 'request_already_reserved', 409)
+                self.active[value['request_id']] = (value['session_id'], cancellation)
+                registered = True
             passes = []
             for index in range(1 if action == 'chat' else 2):
                 with self.controller.background_job(4 if action == 'chat' else 5) as lease:
                     if not reserved:
                         self.store.reserve(value['request_id'], request_hash, value['session_id'], action)
                         reserved = True
-                    with self.lock: self.active[value['request_id']] = (value['session_id'], cancellation)
                     cancellation.attach(lease)
                     remaining = end-time.monotonic()
                     if remaining <= 0: raise TimeoutError()
@@ -327,7 +347,8 @@ class SlackService:
             # Fail closed; do not return model exception text, source, paths or keys.
             pass
         finally:
-            with self.lock: self.active.pop(value['request_id'], None)
+            if registered:
+                with self.lock: self.active.pop(value['request_id'], None)
             if reserved: self.store.finish(value['request_id'], record)
         return record
     def status(self, value):
@@ -368,6 +389,9 @@ class SlackService:
         fields(value, ('proposal_id', 'review_request_id', 'session_id', 'restriction'))
         require(all(safe_id(value[k]) for k in ('proposal_id', 'review_request_id', 'session_id')))
         with self.store.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.store.require_open(db, value['session_id'])
+            self.store.require_fresh(db, 'proposal', value['proposal_id'])
             row = db.execute('SELECT state,result FROM runs WHERE id=?', (value['review_request_id'],)).fetchone()
             require(row is not None and row[0] == 'complete', 'completed_review_required', 409)
             result = json.loads(row[1]); review = result.get('review', {})
@@ -405,7 +429,66 @@ class SlackService:
         payload = strict_json(accepted[0])
         require(result == self.application_result(payload), 'application_integrity', 409)
         return result, payload
+    def retire(self, value):
+        fields(value, ('request_id', 'session_id', 'restriction'))
+        require(safe_id(value['request_id']) and safe_id(value['session_id']))
+        sid, rid = value['session_id'], value['request_id']
+        try:
+            # Never wait on or release another operation's writer lock.
+            with self.store.db(timeout=0) as db:
+                db.execute('PRAGMA secure_delete=ON')
+                db.execute('BEGIN IMMEDIATE')
+                prior = db.execute('SELECT session_id,result FROM retirements WHERE request_id=?', (rid,)).fetchone()
+                if prior is not None:
+                    require(prior[0] == sid, 'retirement_id_conflict', 409)
+                    return strict_json(prior[1])
+                with self.lock:
+                    busy = any(active[0] == sid for active in self.active.values()) or self.applications.get(sid, 0) > 0
+                if busy or db.execute("SELECT 1 FROM runs WHERE session_id=? AND state NOT IN ('complete','interrupted')", (sid,)).fetchone():
+                    return dict(status='deferred', retry_safe=True)
+                # Accepted records and their complete two-pass review audit survive.
+                adopted_reviews = set()
+                for raw, in db.execute('SELECT payload FROM accepted'):
+                    payload = strict_json(raw)
+                    if payload['session_id'] == sid: adopted_reviews.add(payload['review_hash'])
+                remove_runs, retained_reviews = [], set()
+                for run_id, state, raw, operation in db.execute('SELECT id,state,result,operation FROM runs WHERE session_id=?', (sid,)):
+                    result = strict_json(raw) if raw is not None else {}
+                    review_hash = result.get('review_hash') if operation == 'review' else None
+                    if review_hash in adopted_reviews:
+                        require(state == 'complete' and digest(result['review']) == review_hash
+                                and result['review']['candidate'] == result['candidate'], 'retirement_integrity', 409)
+                        retained_reviews.add(review_hash)
+                    else: remove_runs.append((run_id,))
+                require(adopted_reviews <= retained_reviews, 'retirement_integrity', 409)
+                remove_proposals = []
+                for proposal_id, raw in db.execute('SELECT id,payload FROM proposals WHERE id NOT IN (SELECT id FROM accepted)'):
+                    if strict_json(raw)['session_id'] == sid: remove_proposals.append((proposal_id,))
+                db.executemany('INSERT INTO retired_ids VALUES (?,?,?)', [('proposal', item[0], sid) for item in remove_proposals])
+                db.executemany('INSERT INTO retired_ids VALUES (?,?,?)', [('request', item[0], sid) for item in remove_runs])
+                db.executemany('DELETE FROM proposals WHERE id=?', remove_proposals)
+                db.executemany('DELETE FROM runs WHERE id=?', remove_runs)
+                db.execute('INSERT OR IGNORE INTO retired_sessions VALUES (?,?)', (sid, int(self.clock())))
+                result = dict(status='retired', session_id=sid, request_id=rid, adopted_knowledge_preserved=True)
+                db.execute('INSERT INTO retirements VALUES (?,?,?)', (rid, sid, canonical(result).decode()))
+                return result
+        except sqlite3.OperationalError as exc:
+            if (getattr(exc, 'sqlite_errorcode', 0) & 255) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                return dict(status='deferred', retry_safe=True)
+            raise
+
     def apply(self, value):
+        fields(value, ('request_id', 'proposal_id', 'proposal_hash', 'session_id', 'approval', 'restriction'))
+        require(safe_id(value['request_id']) and safe_id(value['proposal_id']) and safe_id(value['session_id']))
+        sid = value['session_id']
+        with self.lock: self.applications[sid] = self.applications.get(sid, 0) + 1
+        try: return self._apply(value)
+        finally:
+            with self.lock:
+                self.applications[sid] -= 1
+                if self.applications[sid] == 0: del self.applications[sid]
+
+    def _apply(self, value):
         require(self.policy.get('human_apply_enabled') is True, 'human_apply_not_qualified', 503)
         fields(value, ('request_id', 'proposal_id', 'proposal_hash', 'session_id', 'approval', 'restriction'))
         require(safe_id(value['request_id']) and safe_id(value['proposal_id']) and safe_id(value['session_id']))
@@ -419,6 +502,7 @@ class SlackService:
         receipt_hash = digest(value)
         with self.store.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self.store.require_open(db, value['session_id'])
             prior = db.execute('SELECT hash,result FROM approvals WHERE id=? OR nonce=? OR request_id=?',
                                (approval['approval_id'], approval['nonce'], value['request_id'])).fetchall()
             if prior:
