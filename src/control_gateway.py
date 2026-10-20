@@ -119,7 +119,7 @@ class LifecycleController:
     def __init__(self, config: GatewayConfig, run_manager: Callable = manager,
                  health: Callable[[int], bool] = healthy, clock: Callable[[], float] = time.monotonic,
                  sleeper: Callable[[float], None] = time.sleep, base_ready: Callable[[], None] | None = None,
-                 audit_fn: Callable = audit, journal_path: Path | None = None):
+                 audit_fn: Callable = audit, journal_path: Path | None = None, background_ready: Callable[[], bool] | None = None):
         self.config = config
         self.run_manager = run_manager
         self.health = health
@@ -145,6 +145,8 @@ class LifecycleController:
         self.last_model_request = clock()
         self.last_heartbeat: float | None = None
         self.last_error: str | None = None
+        self.background_ready = background_ready or (lambda: self.health(site_port("brain")) and listening(site_port("proxy")))
+        self.background_start = None
 
     def snapshot(self) -> dict:
         with self.condition:
@@ -260,9 +262,67 @@ class LifecycleController:
         self.audit("model_started" if success else "model_start_failed", error=self.last_error)
         return success
 
+    def request_background_start(self) -> bool:
+        """Authenticated Slack chat may request one normal local start, without blocking its HTTP request.
+
+        Read/status/review paths do not call this. A failed background start is
+        not automatically retried and never force-stops production processes.
+        """
+        with self.condition:
+            if self.background_start is not None or self.active_jobs or self.queued_jobs or self.background is not None:
+                return False
+            if self.state != ModelState.STOPPED:
+                return False
+            if self.health(site_port('llm')):
+                self.state = ModelState.READY
+                return False
+            if not self.background_ready():
+                return False
+            owner = object()
+            self.background_start = owner
+            self.state, self.last_error = ModelState.STARTING, None
+            self.last_model_request = self.clock()
+            worker = threading.Thread(target=self._background_start_once, args=(owner,), daemon=True,
+                                      name='localbrain-restricted-model-start')
+            try:
+                worker.start()
+            except Exception:
+                self.background_start = None
+                self.state, self.last_error = ModelState.FAILED, 'restricted model start unavailable'
+                self.condition.notify_all()
+                return False
+            return True
+
+    def _background_start_once(self, owner) -> None:
+        success = False
+        try:
+            self.audit('restricted_model_start_requested')
+            self.run_manager('StartLLM', wait=False)
+            end = self.clock() + self.config.start_timeout
+            while self.clock() < end:
+                with self.condition:
+                    if self.background_start is not owner or self.state != ModelState.STARTING:
+                        return
+                if self.health(site_port('llm')):
+                    success = True
+                    break
+                self.sleeper(min(1, max(.01, end-self.clock())))
+        except Exception:
+            success = False
+        finally:
+            with self.condition:
+                if self.background_start is owner:
+                    self.background_start = None
+                    if self.state == ModelState.STARTING:
+                        self.state = ModelState.READY if success else ModelState.FAILED
+                        self.last_error = None if success else 'restricted model readiness failed'
+                    self.last_model_request = self.clock()
+                    self.condition.notify_all()
+            self.audit('restricted_model_start_ready' if success else 'restricted_model_start_finished')
+
     def stop(self, reason: str) -> bool:
         with self.condition:
-            if self.active_jobs or self.queued_jobs: return False
+            if self.active_jobs or self.queued_jobs or self.background_start is not None: return False
             if not self.health(site_port('llm')): self.state = ModelState.STOPPED; return True
             self.state = ModelState.STOPPING
         try:

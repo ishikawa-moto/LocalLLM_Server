@@ -1,27 +1,33 @@
-# Slack Server candidate validation — 2026-10-19
+# Slack Server validation
 
-Candidate only; no deployment, service restart, actual Slack message or real Qwen generation occurred.
+## Current bounded startup change
 
-- Baseline a9a911e public fixture regression: **109 tests, zero failures/errors/skips**, including 42 Slack contract, scheduling, socket cancellation, restricted storage, human adoption, Rule, integrity and status tests. Final run: 18.843 seconds. This is test-suite time, not model performance.
-- JavaScript syntax and diff consistency: PASS. Existing shared LAN Chat history, host/origin guards, normal lifecycle queue and draft-review regressions pass.
-- Blocked local SSE fixture: foreground admission interrupts the original background socket, discards partial output and acquires the shared inference slot within the test's two-second bound. Real Qwen cancellation time is unqualified.
-- Rule scope: only Slack locale/style enums, immutable before/delta/after and base/new hashes, stale-base rejection, no ordinary Actor/Continue/security/auth/path changes. Failure after a Rule write rolls back Rule state, acceptance and approval consumption together.
-- Human authority: exact pinned Host certificate/IP/owner, proposal/review/target/base/new/Session/administrator/expiry/nonce/request binding; duplicate application is idempotent. The Host's actual administrator UI and certificate-to-administrator registration are not tested here.
-- Persisted proposal/review bodies are rehashed before use. Body edits under old stored hashes reject. Unknown restricted database schemas fail closed without automatic migration.
-- Derived content carries the restricted classification; no normal knowledge/index/TaskMemory/export integration is called. Public test connections are constrained to test-created loopback listeners; one original Brain regression uses a separate temporary public HTTP child server. No real Slack source was supplied.
+The Server can opt in to local model startup for validated, Host-authenticated chat. The public configuration example keeps enabled, human_apply_enabled and model_cold_start false. Internal mTLS, Host source/owner checks, certificate pinning, restricted-data egress rules and existing model/context/KV settings are preserved.
 
-Review: self-review only. Independent review, paired Client execution/canonicalization, real mTLS handshake, native administrator/CSRF/receipt flow, paired Host retirement/outbox integration and physical purge across WAL/backups, real Slack, mobile/LAN reachability, production throughput and cold-start priority qualification remain open. `enabled` and `human_apply_enabled` are false in configuration examples. Model/context/KV/auth/service configuration is unchanged. No claim is made that the complete Client/Server Slack feature is production-ready.
+- The complete isolated public regression suite passed: **142 tests, zero failures, errors or skips**, including nine new startup tests and the existing SSE, cancellation, restriction, lifecycle, adoption and retirement tests. Fixtures use test-created loopback listeners rather than production configuration or models.
+- Startup tests cover cold and warm state, coalescing concurrent starts, foreground work joining STARTING, queued/active foreground priority, base-service readiness, owned-start stop exclusion, failure without automatic retry or StopLLM, invalid input and non-starting read/review paths.
+- Limited independent read-only review reported no findings for the startup delta and its exact three-target deployment/rollback procedure. This does not constitute independent qualification of every feature in this PR.
+- A separately authorized public-input check confirmed STOPPED → STARTING → READY → completed response through the existing authenticated Client path. The first chat returned explicit pre-inference deferred with retry_safe:true; only the identical request was submitted after readiness. There was one inference, its public marker matched, its Session retired and final idle was confirmed. No forced stop or additional model trial was used.
+- Existing SSE handling accepts role-null, finish and usage-only metadata while preserving malformed-content, completion-marker, frame-size and cancellation checks. Public tests exercise these boundaries.
 
-## Rollout and rollback boundaries
+This bounded check does not qualify every real Slack, OCR/compression, reconnection/recovery, human knowledge/Rule application, paired retention/outbox, priority-load or other PC/mobile workflow. Client authentication and attachment implementation are maintained separately. No private Slack body, OCR text, generated answer, credentials or database contents are included in this repository or its review evidence.
 
-Keep the draft PR unmerged until the paired qualifications are complete. Use the original production source hash and current Git state as the starting point; stop on drift. Resolve actual Gateway and Chat launch/task bindings rather than assuming historical names. With separate human authorization, verify safe-idle, preserve exact bytes of all replaced source files, create a private SQLite backup if restricted state exists, then stop only the approved services before replacing the seven product files. Configure the Host certificate pin and HTTPS entry separately; do not copy example placeholders as real settings.
+## Lifecycle and retry boundaries
 
-For code rollback, stop only those approved services after safe-idle, require each deployed file to still match the frozen candidate hash, restore its exact pre-change source bytes and remove only newly introduced files matching the frozen candidate. Unknown edits mean HOLD. Do not delete or restore the live restricted database over newer Sessions/approvals; retain it privately for reconciliation. Rule transaction failures roll back automatically. Reversing a successful Rule needs a new exact human-approved inverse proposal against the current base, rather than silently rewinding unrelated state.
+Only a validated authenticated chat can request startup, and only when the local opt-in flag permits it. STARTING is shared rather than launching parallel starts. Foreground admission remains ahead of chat and review. A failed background start does not call StopLLM or automatically try again. Status, capabilities and autonomous review do not start a model.
 
-## Retirement-only candidate addition
+An explicit deferred response before durable reservation is retry-safe; the Host may later resubmit the identical request after readiness. A timeout, interrupted response or uncertain reservation is not permission to infer again. Preserve existing request/Session identity and inspect durable status. Do not manufacture a cold test by stopping a warm model.
 
-The added `POST /v1/slack/retire` follows the exact contract in SLACK-SERVER.md. Host controls policy and commits its deletion/outbox first; no Server retention scheduler was added. Sixteen **additional retirement-only** public-fixture tests pass, zero failures/errors/skips (2.674 seconds). The previous 109 tests were not rerun for this addition. No production, new worker, model, branch or service operation was performed.
+## Deployment and rollback
 
-The added tests cover existing Host authentication, strict schema/restriction, no inference, Session-only cleanup and zeroed deleted DB cells, preserved accepted knowledge/Rule/two-pass audits and applied status, idempotency, live/uncertain/application/writer deferral without cancellation or lock theft, both admission-retirement orderings, duplicate pre-reservation ownership, retired Session/ID resurrection denial and rollback after a partial deletion failure. Self-review only; independent review and the paired Host outbox/retention, real Slack/LAN/mobile and production performance qualifications remain open. Do not describe these separate test runs as one combined rerun.
+Keep the existing PR as a draft until remaining paired qualifications are complete. Each production change requires its exact authorized scope, known preimages and independently reviewed procedure. The startup change replaces two Gateway sources and adds only the local model_cold_start configuration flag. The public disabled example is not a production configuration.
 
-Source rollback after using retirement must preserve tombstone enforcement or leave Slack disabled. Retain adopted audit and the current private database; do not restore stale state that resurrects deleted Sessions.
+Before stopping the registered Gateway task, verify fresh safe-idle, exact task instance GUID/PID/process birth, executable and argument binding, unchanged protected dependencies and exact source/config hashes. Persist the scheduler-returned start identity before health checks. Do not kill a PID, repair a task or stop other services to perform this rollout.
+
+Rollback requires the owned execution receipt, exact known old/new bytes and backup hashes, unchanged dependencies and a new safe-idle observation. Unknown edits, busy state, unreachable status, an incomplete receipt or a replacement process require reconciliation. Preserve current private databases, accepted knowledge, Rule policy, receipts and retirement tombstones; never restore stale state that resurrects a retired Session.
+
+## Earlier fixture evidence
+
+The initial candidate passed 109 public fixture tests, followed by 16 retirement-only tests. The SSE follow-up subsequently passed the complete 133-test suite. The current 142-test result is a new complete run for the startup source change, not a sum presented as a single historical run.
+
+Retirement fixtures cover authentication, strict restriction/schema checks, no inference, Session-only cleanup, preservation of accepted knowledge/Rule/adopted two-pass audit, exact replay, active/unresolved/application/writer deferral, admission races, tombstones and transaction rollback. SQLite secure_delete covers deleted database cells; forensic removal from WAL, backups and storage remains outside that fixture claim.

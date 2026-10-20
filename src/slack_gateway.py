@@ -229,7 +229,8 @@ class SlackService:
             path = Path(root)/'config'/'slack-server.json'
             if path.is_file():
                 policy = strict_json(path.read_bytes())
-                fields(policy, ('enabled', 'host_certificate_sha256', 'human_apply_enabled'))
+                require(set(policy) in ({'enabled', 'host_certificate_sha256', 'human_apply_enabled'}, {'enabled', 'host_certificate_sha256', 'human_apply_enabled', 'model_cold_start'}))
+                require('model_cold_start' not in policy or type(policy['model_cold_start']) is bool)
                 require(type(policy['enabled']) is bool and type(policy['human_apply_enabled']) is bool)
                 require(bool(HEX.fullmatch(policy['host_certificate_sha256'])))
         except (SlackError, ValueError, TypeError, OSError): policy = {}
@@ -245,7 +246,7 @@ class SlackService:
                     session_retirement=enabled, restricted_proposal=enabled, human_restricted_adoption=enabled and self.policy.get('human_apply_enabled') is True,
                     ordinary_secondbrain_adoption=False, automatic_adoption=False, rule_proposal=enabled,
                     rule_activation=enabled and self.policy.get('human_apply_enabled') is True, rule_targets=[RULE_TARGET], rule_values=RULE_VALUES,
-                    external_ai=False, cloud_fallback=False, model_cold_start=False, max_concurrency=1,
+                    external_ai=False, cloud_fallback=False, model_cold_start=enabled and self.policy.get('model_cold_start') is True, max_concurrency=1,
                     chat_max_tokens=1024, chat_timeout_seconds=30, review_passes=2, review_timeout_seconds=60,
                     classification=CLASSIFICATION)
     def dispatch(self, route, value):
@@ -292,6 +293,9 @@ class SlackService:
                 require(value['request_id'] not in self.active, 'request_already_reserved', 409)
                 self.active[value['request_id']] = (value['session_id'], cancellation)
                 registered = True
+            if action == 'chat' and self.policy.get('model_cold_start') is True:
+                self.controller.request_background_start()
+                require(self.controller.snapshot()['state'] != 'FAILED', 'local_model_start_failed', 503)
             passes = []
             for index in range(1 if action == 'chat' else 2):
                 with self.controller.background_job(4 if action == 'chat' else 5) as lease:
