@@ -209,18 +209,23 @@ class Job:
 def build_context(upstream, config, history, prompt, results, web_results=None, web_status='off'):
     # Tokenize actual templated messages, never character-count estimates.
     sources, references = [], []
+    # SecondBrain is ON by default: it must not consume the entire Web evidence budget.
+    brain_budget = config['max_retrieval_tokens']//2 if web_results else config['max_retrieval_tokens']
     for result in results:
         if float(result.get('hybrid_score',0)) < config['score_threshold']: continue
         label = 'S'+str(len(sources)+1)
         reference = dict(source=label, path=result.get('path',''), revision=result.get('revision',''), text=result.get('text',''))
         candidate = references+[reference]
-        if upstream.tokens(json.dumps(candidate,ensure_ascii=False)) > config['max_retrieval_tokens']: continue
+        if upstream.tokens(json.dumps(candidate,ensure_ascii=False)) > brain_budget: continue
         references = candidate
         sources.append({k:v for k,v in reference.items() if k != 'text'})
     web_sources = []
     for result in web_results or []:
         reference = dict(source='W'+str(len(web_sources)+1), **result)
         candidate = references+[reference]
+        # Keep a bounded excerpt even if the provider's first result is lengthy.
+        while reference.get('text') and upstream.tokens(json.dumps(candidate,ensure_ascii=False)) > config['max_retrieval_tokens']:
+            reference['text'] = reference['text'][:len(reference['text'])//2]
         if upstream.tokens(json.dumps(candidate,ensure_ascii=False)) > config['max_retrieval_tokens']:
             continue
         references = candidate

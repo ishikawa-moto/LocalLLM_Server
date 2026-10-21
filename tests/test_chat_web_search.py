@@ -234,9 +234,18 @@ class WebChatTests(unittest.TestCase):
         cfg = chat.DEFAULTS | dict(context_tokens=1200, output_tokens=100, max_retrieval_tokens=400)
         rows = self.web.search.return_value + [dict(url='https://example.org/',title='Huge',text='x'*2000)]
         messages, meta = chat.build_context(self.fake,cfg,[],'search',[], rows,'completed')
-        self.assertEqual(len(meta['web_sources']),1)
+        self.assertGreaterEqual(len(meta['web_sources']),1)
         self.assertLessEqual(meta['context_tokens'],1100)
         self.assertNotIn('x'*2000,messages[-1]['content'])
+
+    def test_default_secondbrain_cannot_starve_web_evidence(self):
+        cfg = chat.DEFAULTS | dict(max_retrieval_tokens=600)
+        brain_rows = [dict(text='B'*300,path='fact.md',revision='1',hybrid_score=1)]
+        web_rows = [dict(url='https://docs.python.org/3/',title='Public result',text='W'*1800)]
+        messages,meta = chat.build_context(self.fake,cfg,[],'search',brain_rows,web_rows,'completed')
+        self.assertTrue(meta['web_search_used'])
+        self.assertIn('W1',messages[-1]['content'])
+        self.assertLessEqual(self.fake.tokens(messages[-1]['content'].split('reference_context (参考資料):\n')[1]),600)
 
     def test_browser_http_health_submit_events_and_saved_sources(self):
         server = chat.Server((base.LOOPBACK,0),chat.Handler)
