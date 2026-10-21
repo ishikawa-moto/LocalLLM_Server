@@ -198,6 +198,8 @@ def build_context(upstream, config, history, prompt, results):
 
 class App:
     def __init__(self, root, config, upstream=None):
+        from slack_web import approval_entry
+        self.approval_entry = approval_entry(root)
         self.config = config
         self.upstream = upstream or Upstream(root, config)
         self.store = Store(root/'runtime/chat.sqlite3')
@@ -342,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self.guard(); owner=self.owner(); path=urlsplit(self.path).path
+            if path == '/api/slack-approval-entry':
+                return self.send(200, getattr(self.app, 'approval_entry', {'enabled':False}))
             if path in ('/','/app.js','/style.css'):
                 filename={'/':'index.html','/app.js':'app.js','/style.css':'style.css'}[path]
                 data=(ROOT/'chat-web'/filename).read_bytes()

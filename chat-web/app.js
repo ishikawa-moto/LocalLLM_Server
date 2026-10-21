@@ -22,3 +22,9 @@ function refreshSharedList(){if(!busy&&!document.hidden)list().catch(e=>status(e
 window.addEventListener('focus',refreshSharedList);
 document.addEventListener('visibilitychange',refreshSharedList);
 setInterval(refreshSharedList,5000);
+
+// Navigation only. Approval authentication and actions stay on the Windows Host.
+(async()=>{try{const entry=await api('/api/slack-approval-entry');
+if(entry.enabled===true&&typeof entry.url==='string'){const u=new URL(entry.url);
+if(u.protocol==='https:'&&!u.username&&!u.password&&!u.search&&!u.hash){
+const link=$('slack-approvals');link.href=u.href;link.hidden=false;}}}catch{}})();

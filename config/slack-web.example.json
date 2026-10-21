@@ -1,0 +1,4 @@
+{
+  "enabled": false,
+  "approval_url": "https://__CLIENT_HOST__:__APPROVAL_HTTPS_PORT__/slack/approvals"
+}
