@@ -1,4 +1,4 @@
-"""Bounded public search for browser Chat only; no page fetching or cloud inference."""
+"""Bounded public search for browser Chat only; no page fetching or cloud answer calls."""
 from __future__ import annotations
 
 import html
@@ -10,10 +10,10 @@ import socket
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
-HOST = 'api.search.brave.com'
-PATH = '/res/v1/web/search'
+HOST = 'api.tavily.com'
+PATH = '/search'
 MAX_BYTES = 256 * 1024
 TIMEOUT = 12
 MAX_QUERY = 200
@@ -92,7 +92,6 @@ def _text(value, limit):
 
 class WebSearch:
     def __init__(self, root):
-        self.key = None
         self.status = 'not_configured'
         path = root / 'config' / 'private-chat-web-search.json'
         if not path.exists():
@@ -104,12 +103,11 @@ class WebSearch:
             if not cfg['enabled']:
                 self.status = 'disabled'
                 return
-            if cfg.get('provider') != 'brave':
+            if cfg.get('provider') != 'tavily_keyless':
                 raise ValueError()
-            key = cfg.get('api_key')
-            if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_-]{10,512}', key):
+            # Never accept credentials or silently turn keyless usage into billed usage.
+            if any(name in cfg for name in ('api_key', 'authorization', 'token')):
                 raise ValueError()
-            self.key = key
             self.status = 'ready'
         except (OSError, ValueError, TypeError):
             self.status = 'configuration_error'
@@ -138,12 +136,17 @@ class WebSearch:
         timer.daemon = True
         timer.start()
         try:
-            conn.request('GET', PATH + '?' + urlencode(dict(q=query, count=MAX_RESULTS, safesearch='moderate',
-                                                         text_decorations='false')),
+            body = json.dumps(dict(query=query,max_results=MAX_RESULTS,search_depth='basic',
+                                   auto_parameters=False,include_answer=False,include_raw_content=False,
+                                   include_images=False,safe_search=True)).encode('utf-8')
+            conn.request('POST', PATH, body=body,
                          headers={'Accept': 'application/json', 'Accept-Encoding': 'identity',
-                                  'X-Subscription-Token': self.key, 'User-Agent': 'LocalBrainChat/1'})
+                                  'Content-Type':'application/json','X-Tavily-Access-Mode':'keyless',
+                                  'User-Agent': 'LocalBrainChat/1'})
             active_socket = conn.sock
             response = conn.getresponse()
+            if response.status == 429:
+                raise SearchError('rate_limited')
             if response.status != 200:
                 raise SearchError('provider_unavailable')
             raw = bytearray()
@@ -164,7 +167,9 @@ class WebSearch:
             if timed_out.is_set():
                 raise SearchError('search_timeout')
             value = json.loads(raw)
-            rows = value.get('web', {}).get('results', [])
+            if not isinstance(value,dict) or 'error' in value:
+                raise SearchError('provider_unavailable')
+            rows = value.get('results')
             if not isinstance(rows, list):
                 raise ValueError()
             results, seen = [], set()
@@ -174,7 +179,7 @@ class WebSearch:
                     continue
                 seen.add(row['url'])
                 results.append(dict(url=row['url'], title=_text(row.get('title'), 200),
-                                    text=_text(row.get('description'), 1800), retrieved_at=retrieved))
+                                    text=_text(row.get('content'), 1800), retrieved_at=retrieved))
                 if len(results) == MAX_RESULTS:
                     break
             return results

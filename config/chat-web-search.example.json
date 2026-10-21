@@ -1,5 +1,4 @@
 {
   "enabled": false,
-  "provider": "brave",
-  "api_key": "__ENTER_LOCALLY_ONLY__"
+  "provider": "tavily_keyless"
 }

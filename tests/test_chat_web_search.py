@@ -23,7 +23,7 @@ class SearchProviderTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def provider(self):
-        self.path.write_text(json.dumps(dict(enabled=True, provider='brave', api_key='PUBLIC_FIXTURE_KEY')))
+        self.path.write_text(json.dumps(dict(enabled=True, provider='tavily_keyless')))
         return WebSearch(self.root)
 
     def test_configuration_is_opt_in_and_errors_do_not_break_chat(self):
@@ -34,6 +34,8 @@ class SearchProviderTests(unittest.TestCase):
         self.path.write_text('{"enabled":false}')
         self.assertEqual(WebSearch(self.root).status, 'disabled')
         self.assertTrue(self.provider().ready)
+        self.path.write_text('{"enabled":true,"provider":"tavily_keyless","api_key":"PUBLIC_FIXTURE"}')
+        self.assertEqual(WebSearch(self.root).status,'configuration_error')
 
     def test_planner_requires_exact_json_and_validates_before_network(self):
         self.assertEqual(plan_query('{"query":""}'), '')
@@ -54,19 +56,25 @@ class SearchProviderTests(unittest.TestCase):
         return conn
 
     def test_fixed_tls_endpoint_single_call_bounded_safe_results(self):
-        body = json.dumps(dict(web=dict(results=[
+        body = json.dumps(dict(results=[
             dict(url='javascript:alert(1)', title='bad'),
             dict(url='http://localhost/admin', title='private'),
-            dict(url='https://example.org/docs', title='<b>Official</b>', description='A &amp; B'),
-            dict(url='https://example.org/docs', title='duplicate')]))).encode()
+            dict(url='https://example.org/docs', title='<b>Official</b>', content='A &amp; B'),
+            dict(url='https://example.org/docs', title='duplicate')])).encode()
         conn = self.response(body)
         with patch('chat_web_search.http.client.HTTPSConnection', return_value=conn) as connect:
             results = self.provider().search('Python release notes', lambda: None)
-        connect.assert_called_once_with('api.search.brave.com', timeout=12)
+        connect.assert_called_once_with('api.tavily.com', timeout=12)
         self.assertEqual(conn.request.call_count, 1)
         method, path = conn.request.call_args.args
-        self.assertEqual(method, 'GET')
-        self.assertTrue(path.startswith('/res/v1/web/search?q=Python+release+notes&'))
+        self.assertEqual(method, 'POST')
+        self.assertEqual(path,'/search')
+        payload=json.loads(conn.request.call_args.kwargs['body'])
+        headers=conn.request.call_args.kwargs['headers']
+        self.assertEqual(payload['query'],'Python release notes')
+        self.assertFalse(payload['include_answer'])
+        self.assertEqual(headers['X-Tavily-Access-Mode'],'keyless')
+        self.assertNotIn('Authorization',headers)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['title'], 'Official')
         self.assertEqual(results[0]['text'], 'A & B')
@@ -74,7 +82,7 @@ class SearchProviderTests(unittest.TestCase):
         conn.close.assert_called_once()
 
     def test_redirect_http_error_invalid_json_and_oversize_are_not_success(self):
-        for body, status in ((b'{}', 302), (b'PRIVATE_RESPONSE', 429), (b'not-json', 200), (b'x'*(256*1024+1), 200)):
+        for body, status in ((b'{}', 302), (b'PRIVATE_RESPONSE', 429), (b'not-json', 200), (b'{"error":{"code":"keyless_limit_exceeded","message":"sign up"}}',200), (b'x'*(256*1024+1), 200)):
             with self.subTest(status=status, size=len(body)):
                 conn = self.response(body, status)
                 with patch('chat_web_search.http.client.HTTPSConnection', return_value=conn):
