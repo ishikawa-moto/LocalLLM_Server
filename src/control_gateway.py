@@ -119,7 +119,7 @@ class LifecycleController:
     def __init__(self, config: GatewayConfig, run_manager: Callable = manager,
                  health: Callable[[int], bool] = healthy, clock: Callable[[], float] = time.monotonic,
                  sleeper: Callable[[float], None] = time.sleep, base_ready: Callable[[], None] | None = None,
-                 audit_fn: Callable = audit, journal_path: Path | None = None, background_ready: Callable[[], bool] | None = None):
+                 audit_fn: Callable = audit, journal_path: Path | None = None, background_ready: Callable[[], bool] | None = None, start_admission: Callable[[], bool] | None = None):
         self.config = config
         self.run_manager = run_manager
         self.health = health
@@ -147,6 +147,7 @@ class LifecycleController:
         self.last_error: str | None = None
         self.background_ready = background_ready or (lambda: self.health(site_port("brain")) and listening(site_port("proxy")))
         self.background_start = None
+        self.start_admission = start_admission or (lambda: resource_status(for_start=True)["accepting_jobs"])
 
     def snapshot(self) -> dict:
         with self.condition:
@@ -277,6 +278,20 @@ class LifecycleController:
                 self.state = ModelState.READY
                 return False
             self.state = ModelState.STOPPED
+        # GPU sampling can take seconds. Do not hold the foreground condition lock.
+        try:
+            if not self.start_admission():
+                return False
+        except Exception:
+            return False
+        with self.condition:
+            if self.background_start is not None or self.active_jobs or self.queued_jobs or self.background is not None:
+                return False
+            if self.state not in (ModelState.STOPPED, ModelState.READY):
+                return False
+            if self.health(site_port('llm')):
+                self.state = ModelState.READY
+                return False
             if not self.background_ready():
                 return False
             owner = object()
@@ -444,7 +459,7 @@ CONFIG = GatewayConfig()
 CONTROLLER = LifecycleController(CONFIG)
 
 
-def resource_status() -> dict:
+def resource_status(for_start: bool = False) -> dict:
     class MemoryStatus(ctypes.Structure):
         _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total_phys", ctypes.c_ulonglong),
                     ("avail_phys", ctypes.c_ulonglong), ("total_page", ctypes.c_ulonglong), ("avail_page", ctypes.c_ulonglong),
@@ -464,7 +479,7 @@ def resource_status() -> dict:
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         pass
     state = CONTROLLER.snapshot()["state"]
-    gpu_ok = state in (ModelState.READY.value, ModelState.BUSY.value) or not gpu["available"] or gpu["free_gb"] >= CONFIG.min_gpu_free_gb_for_start
+    gpu_ok = (not for_start and state in (ModelState.READY.value, ModelState.BUSY.value)) or not gpu["available"] or gpu["free_gb"] >= CONFIG.min_gpu_free_gb_for_start
     return {"ram_used_gb": round(used, 2), "ram_total_gb": round(status.total_phys / 1024 ** 3, 2),
             "ram_limit_gb": CONFIG.max_ram_usage_gb, "gpu": gpu,
             "min_gpu_free_gb_for_start": CONFIG.min_gpu_free_gb_for_start,

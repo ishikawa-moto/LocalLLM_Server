@@ -285,8 +285,9 @@ class SlackService:
         request_hash = digest(dict(action=action, value=value))
         previous = self.store.existing(value['request_id'], request_hash, value['session_id'])
         if previous is not None: return previous
-        if self.resource_status is not None:
-            require(self.resource_status().get('accepting_jobs', False), 'resource_limit_exceeded', 503)
+        if self.resource_status is not None and not self.resource_status().get('accepting_jobs', False):
+            # No reservation, model request or side effect has happened.
+            return dict(status='deferred', retry_safe=True, reason='resource_limit_exceeded')
         limit = min(value['max_tokens'], 1024)
         timeout = min(value['timeout_seconds'], 30 if action == 'chat' else 60)
         end, reserved = time.monotonic()+timeout, False

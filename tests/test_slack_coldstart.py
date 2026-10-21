@@ -3,6 +3,8 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from pathlib import Path
 import control_gateway as g
 from slack_gateway import SlackService, SlackError, Deferred
@@ -14,7 +16,7 @@ class ColdStartTests(unittest.TestCase):
     def make(self, runtime, base=True, timeout=.15):
         return g.LifecycleController(g.GatewayConfig(start_timeout=timeout), runtime.manager, runtime.health,
             sleeper=lambda _: time.sleep(.003), audit_fn=lambda *a, **k: None, base_ready=lambda: None,
-            background_ready=lambda: base)
+            background_ready=lambda: base,start_admission=lambda: True)
 
     def wait(self, c):
         end=time.monotonic()+2
@@ -86,8 +88,8 @@ class ColdStartTests(unittest.TestCase):
     def test_resource_limit_prevents_cold_start(self):
         r=Runtime();c=self.make(r);s=self.service(c,True)
         s.resource_status=lambda: {'accepting_jobs':False}
-        with self.assertRaises(SlackError) as error:s.execute('chat',request())
-        self.assertEqual(error.exception.http,503);self.assertEqual(r.starts,0)
+        self.assertEqual(s.execute('chat',request()),dict(status='deferred',retry_safe=True,reason='resource_limit_exceeded'))
+        self.assertEqual(r.starts,0)
 
     def test_failed_start_returns_explicit_error_instead_of_endless_queue(self):
         r=Runtime(fail=True);c=self.make(r,timeout=.025);s=self.service(c,True)
@@ -101,3 +103,33 @@ class ColdStartTests(unittest.TestCase):
         value=request();value['context']='x'*17000
         with self.assertRaises(SlackError):s.execute('chat',value)
         self.assertEqual(r.starts,0)
+
+    def test_stale_ready_rechecks_actual_gpu_before_start(self):
+        r=Runtime();c=self.make(r);c.state=g.ModelState.READY
+        config=g.GatewayConfig(max_ram_usage_gb=10000,min_gpu_free_gb_for_start=10)
+        c.start_admission=lambda:g.resource_status(for_start=True)['accepting_jobs']
+        with patch.object(g,'CONTROLLER',c),patch.object(g,'CONFIG',config),patch.object(g.subprocess,'run',return_value=SimpleNamespace(stdout='900, 1000\n')):
+            self.assertTrue(g.resource_status()['accepting_jobs'])  # stale status alone is insufficient
+            self.assertFalse(c.request_background_start())
+        self.assertEqual(r.starts,0);self.assertEqual(c.state,g.ModelState.STOPPED)
+
+    def test_sampling_does_not_lock_out_foreground_and_rechecks_ownership(self):
+        r=Runtime();c=self.make(r);sampled=threading.Event();release=threading.Event()
+        def sample():
+            sampled.set();self.assertTrue(release.wait(1));return True
+        c.start_admission=sample;result=[]
+        thread=threading.Thread(target=lambda:result.append(c.request_background_start()))
+        thread.start();self.assertTrue(sampled.wait(1))
+        acquired=c.condition.acquire(timeout=.1)
+        try:
+            self.assertTrue(acquired,'resource sampling held the foreground condition lock')
+            c.queued_jobs=1
+        finally:
+            if acquired:c.condition.release()
+            release.set();thread.join(1)
+        self.assertEqual(result,[False]);self.assertEqual(r.starts,0)
+
+    def test_failed_admission_never_starts_model(self):
+        r=Runtime();c=self.make(r)
+        c.start_admission=lambda:False
+        self.assertFalse(c.request_background_start());self.assertEqual(r.starts,0)

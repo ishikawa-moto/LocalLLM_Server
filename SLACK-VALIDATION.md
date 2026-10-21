@@ -42,3 +42,14 @@ Rollback requires the owned execution receipt, exact known old/new bytes and bac
 The initial candidate passed 109 public fixture tests, followed by 16 retirement-only tests. The SSE follow-up subsequently passed the complete 133-test suite. The current 142-test result is a new complete run for the startup source change, not a sum presented as a single historical run.
 
 Retirement fixtures cover authentication, strict restriction/schema checks, no inference, Session-only cleanup, preservation of accepted knowledge/Rule/adopted two-pass audit, exact replay, active/unresolved/application/writer deferral, admission races, tombstones and transaction rollback. SQLite secure_delete covers deleted database cells; forensic removal from WAL, backups and storage remains outside that fixture claim.
+
+
+## 2026-10-21 resource admission integration fixes
+
+The complete public regression passed 148 tests with zero failures, errors or skips. Production configuration and models were not used; network access was confined to fixture-owned loopback listeners.
+
+Resource refusal before durable reservation now returns a structured deferred response with retry_safe=true. The same immutable request can complete once after resource recovery, then returns its cached result. Cached status/result and cancellation remain available during pressure; startup failure and uncertain results are not converted into retry-safe responses.
+
+Authenticated background cold start reconciles actual model health and samples cold-start RAM/GPU admission outside the foreground condition lock. It then rechecks ownership, queued/active work and lifecycle state before reserving one start. Fixtures cover stale READY with insufficient GPU space, foreground arrival during sampling, denied admission, coalesced startup and FAILED without automatic retry or forced stop.
+
+This update changes PR source only. No production deployment, service restart, model launch or live Slack inference was performed. Earlier live qualification refers to earlier installed builds; merge alone does not deploy these fixes.

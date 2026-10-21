@@ -101,14 +101,21 @@ class ServiceTests(unittest.TestCase):
         v=request(); self.assertEqual(self.dispatch('chat',v),self.dispatch('chat',v)); self.assertEqual(len(self.calls),1)
         v['prompt']='changed'
         with self.assertRaises(SlackError): self.dispatch('chat',v)
+    def test_utf8_source_budget_includes_context_separator(self):
+        value=request();value['context']='[]';value['prompt']='x'*15997
+        self.assertEqual(self.dispatch('chat',value)['status'],'complete')
+        value=request(rid='request_byte_boundary_02');value['context']='[]';value['prompt']='x'*15998
+        with self.assertRaises(SlackError) as error:self.dispatch('chat',value)
+        self.assertEqual(error.exception.code,'input_budget_exceeded')
+        self.assertEqual(len(self.calls),1)
     def test_resource_limit_blocks_fresh_inference_but_allows_cached_and_non_inference(self):
         value=request()
         result=self.dispatch('chat',value)
         checks=[]
         self.s.resource_status=lambda: checks.append(True) or {'accepting_jobs':False}
-        with self.assertRaises(SlackError) as caught:
-            self.dispatch('chat',request(rid='request_resource_limit_01'))
-        self.assertEqual((caught.exception.code,caught.exception.http),('resource_limit_exceeded',503))
+        deferred=self.dispatch('chat',request(rid='request_resource_limit_01'))
+        self.assertEqual(deferred,dict(status='deferred',retry_safe=True,reason='resource_limit_exceeded'))
+        self.assertEqual(len(self.calls),1)
         self.assertEqual(self.dispatch('chat',value),result)
         status=dict(operation='chat',request_id=value['request_id'],session_id=value['session_id'],
                     request_hash=digest(dict(action='chat',value=value)),restriction=copy.deepcopy(RESTRICTION))
@@ -116,6 +123,12 @@ class ServiceTests(unittest.TestCase):
         cancel=dict(request_id=value['request_id'],session_id=value['session_id'],restriction=copy.deepcopy(RESTRICTION))
         self.assertFalse(self.dispatch('cancel',cancel)['cancelled'])
         self.assertEqual(len(checks),1)
+        self.s.resource_status=lambda: {'accepting_jobs':True}
+        fresh=request(rid='request_resource_limit_01')
+        resumed=self.dispatch('chat',fresh)
+        self.assertEqual(resumed['status'],'complete')
+        self.assertEqual(self.dispatch('chat',fresh),resumed)
+        self.assertEqual(len(self.calls),2)  # only the resumed call inferred, then exact replay
     def test_malformed_or_weakened_restriction_rejected(self):
         for key,replacement in [('cloudFallback',True),('cloudFallback',0),('origin','web'),('externalAi','allow')]:
             v=request(); v['restriction'][key]=replacement
