@@ -271,11 +271,12 @@ class LifecycleController:
         with self.condition:
             if self.background_start is not None or self.active_jobs or self.queued_jobs or self.background is not None:
                 return False
-            if self.state != ModelState.STOPPED:
+            if self.state not in (ModelState.STOPPED, ModelState.READY):
                 return False
             if self.health(site_port('llm')):
                 self.state = ModelState.READY
                 return False
+            self.state = ModelState.STOPPED
             if not self.background_ready():
                 return False
             owner = object()
