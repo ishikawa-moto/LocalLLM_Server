@@ -167,9 +167,11 @@ class RestrictedStore:
     def db(self, timeout=5):
         # Do not follow junctions/symlinks into a normal knowledge or external tree.
         for p in (self.path, *self.path.parents):
-            if p.exists():
+            try:
                 info = p.lstat()
-                require(not p.is_symlink() and not (getattr(info, 'st_file_attributes', 0) & 0x400), 'unsafe_storage', 503)
+            except FileNotFoundError:
+                continue
+            require(not p.is_symlink() and not (getattr(info, 'st_file_attributes', 0) & 0x400), 'unsafe_storage', 503)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=timeout)
         try:
