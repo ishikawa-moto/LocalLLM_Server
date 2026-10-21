@@ -281,6 +281,20 @@ class WebChatTests(unittest.TestCase):
         self.assertEqual(self.app.web_search._search.call_count,1)
         self.assertEqual(self.app.store.messages('a',job.cid),[])
 
+    def test_failed_local_assessment_falls_back_but_explicit_cancel_does_not(self):
+        for error in (chat.ChatError('Qwen timeout',504),chat.ChatError('Qwen unavailable'),TimeoutError()):
+            self.use_real_cascade()
+            self.fake.web_search_sufficient=Mock(side_effect=error)
+            job=self.web_job()
+            self.assertEqual(job.events[-1]['status'],'completed')
+            self.assertEqual(job.metadata['web_sources'][0]['provider'],'tavily_keyless')
+            self.assertEqual(self.app.web_search._search.call_count,2)
+        self.use_real_cascade()
+        self.fake.web_search_sufficient=Mock(side_effect=chat.ChatError('Cancelled',409))
+        job=self.web_job()
+        self.assertEqual(job.events[-1]['status'],'Cancelled')
+        self.assertEqual(self.app.web_search._search.call_count,1)
+
     def test_unconfigured_and_invalid_request_rejected_before_queue(self):
         cid = self.app.store.create('a')
         for value in ('yes', 1, None):

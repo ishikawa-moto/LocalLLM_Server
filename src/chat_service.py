@@ -357,8 +357,17 @@ class App:
                                 job.metadata.setdefault('web_search_attempts',[]).append(attempt)
                                 if attempt['provider']=='searxng' and attempt['status'] != 'sufficient':
                                     job.emit('state',state='自前検索の結果が不足・利用不可のため、公式無料枠で追加検索中')
+                            def evaluate(rows):
+                                try:
+                                    return self.upstream.web_search_sufficient(job,rows)
+                                except (ChatError,OSError,http.client.HTTPException) as exc:
+                                    job.check()
+                                    if isinstance(exc,ChatError) and exc.code=='Cancelled': raise
+                                    self.upstream.cancel(job.id+'.web-check')
+                                    job.emit('warning',message='検索結果の十分性を判定できないため、公式無料枠で追加確認します。')
+                                    return False
                             web_results = self.web_search.search(query, job.check,
-                                evaluate=lambda rows:self.upstream.web_search_sufficient(job,rows),report=report)
+                                evaluate=evaluate,report=report)
                             job.metadata['web_search_status'] = 'completed' if web_results else 'no_results'
                         else:
                             job.metadata['web_search_status'] = 'not_needed'
