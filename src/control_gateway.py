@@ -720,7 +720,7 @@ def main() -> None:
     from slack_gateway import SlackService, LoopbackModel
     server.slack_service = SlackService.from_root(ROOT, CONTROLLER, LoopbackModel(
         LOOPBACK, site_port('llm'), lambda: load_internal_keys()['llm']),
-        site_value("client_address", "localbrain-client", ROOT), APPROVAL_OWNER)
+        site_value("client_address", "localbrain-client", ROOT), APPROVAL_OWNER, resource_status=resource_status)
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH); context.load_cert_chain(TLS / "server.pem", TLS / "server-key.pem")
     context.load_verify_locations(TLS / "ca.pem"); context.verify_mode = ssl.CERT_REQUIRED; server.socket = context.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=idle_watch, daemon=True).start(); threading.Thread(target=CONTROLLER.ensure_base, daemon=True).start()

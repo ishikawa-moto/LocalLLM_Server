@@ -218,14 +218,15 @@ class RestrictedStore:
 
 class SlackService:
     POST_ROUTES = {'/v1/slack/chat', '/v1/slack/review', '/v1/slack/proposal', '/v1/slack/apply', '/v1/slack/cancel', '/v1/slack/status', '/v1/slack/retire'}
-    def __init__(self, root, controller, model, client_ip, owner, policy, clock=time.time):
+    def __init__(self, root, controller, model, client_ip, owner, policy, clock=time.time, resource_status=None):
         self.controller, self.model, self.client_ip, self.owner = controller, model, client_ip, owner
         self.policy, self.clock = policy, clock
+        self.resource_status = resource_status
         self.store = RestrictedStore(root)
         self.active, self.lock = {}, threading.Lock()
         self.applications = {}
     @classmethod
-    def from_root(cls, root, controller, model, client_ip, owner):
+    def from_root(cls, root, controller, model, client_ip, owner, resource_status=None):
         policy = {}
         try:
             path = Path(root)/'config'/'slack-server.json'
@@ -236,7 +237,7 @@ class SlackService:
                 require(type(policy['enabled']) is bool and type(policy['human_apply_enabled']) is bool)
                 require(bool(HEX.fullmatch(policy['host_certificate_sha256'])))
         except (SlackError, ValueError, TypeError, OSError): policy = {}
-        return cls(root, controller, model, client_ip, owner, policy)
+        return cls(root, controller, model, client_ip, owner, policy, resource_status=resource_status)
     def authenticate(self, ip, cert, owner):
         require(ip == self.client_ip and owner == self.owner and bool(cert), 'host_only', 403)
         pin = self.policy.get('host_certificate_sha256', '')
@@ -284,6 +285,8 @@ class SlackService:
         request_hash = digest(dict(action=action, value=value))
         previous = self.store.existing(value['request_id'], request_hash, value['session_id'])
         if previous is not None: return previous
+        if self.resource_status is not None:
+            require(self.resource_status().get('accepting_jobs', False), 'resource_limit_exceeded', 503)
         limit = min(value['max_tokens'], 1024)
         timeout = min(value['timeout_seconds'], 30 if action == 'chat' else 60)
         end, reserved = time.monotonic()+timeout, False

@@ -101,6 +101,21 @@ class ServiceTests(unittest.TestCase):
         v=request(); self.assertEqual(self.dispatch('chat',v),self.dispatch('chat',v)); self.assertEqual(len(self.calls),1)
         v['prompt']='changed'
         with self.assertRaises(SlackError): self.dispatch('chat',v)
+    def test_resource_limit_blocks_fresh_inference_but_allows_cached_and_non_inference(self):
+        value=request()
+        result=self.dispatch('chat',value)
+        checks=[]
+        self.s.resource_status=lambda: checks.append(True) or {'accepting_jobs':False}
+        with self.assertRaises(SlackError) as caught:
+            self.dispatch('chat',request(rid='request_resource_limit_01'))
+        self.assertEqual((caught.exception.code,caught.exception.http),('resource_limit_exceeded',503))
+        self.assertEqual(self.dispatch('chat',value),result)
+        status=dict(operation='chat',request_id=value['request_id'],session_id=value['session_id'],
+                    request_hash=digest(dict(action='chat',value=value)),restriction=copy.deepcopy(RESTRICTION))
+        self.assertEqual(self.dispatch('status',status)['state'],'complete')
+        cancel=dict(request_id=value['request_id'],session_id=value['session_id'],restriction=copy.deepcopy(RESTRICTION))
+        self.assertFalse(self.dispatch('cancel',cancel)['cancelled'])
+        self.assertEqual(len(checks),1)
     def test_malformed_or_weakened_restriction_rejected(self):
         for key,replacement in [('cloudFallback',True),('cloudFallback',0),('origin','web'),('externalAi','allow')]:
             v=request(); v['restriction'][key]=replacement

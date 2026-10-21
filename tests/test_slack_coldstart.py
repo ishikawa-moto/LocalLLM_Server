@@ -83,6 +83,12 @@ class ColdStartTests(unittest.TestCase):
         value=s.execute('chat',request());self.assertEqual(value['status'],'complete')
         self.assertEqual(s.execute('chat',request()),value);self.assertEqual(r.starts,1)
 
+    def test_resource_limit_prevents_cold_start(self):
+        r=Runtime();c=self.make(r);s=self.service(c,True)
+        s.resource_status=lambda: {'accepting_jobs':False}
+        with self.assertRaises(SlackError) as error:s.execute('chat',request())
+        self.assertEqual(error.exception.http,503);self.assertEqual(r.starts,0)
+
     def test_failed_start_returns_explicit_error_instead_of_endless_queue(self):
         r=Runtime(fail=True);c=self.make(r,timeout=.025);s=self.service(c,True)
         self.assertEqual(s.execute('chat',request())['status'],'deferred')
