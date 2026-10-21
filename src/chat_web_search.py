@@ -10,7 +10,7 @@ import socket
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 
 HOST = 'api.tavily.com'
 PATH = '/search'
@@ -18,6 +18,7 @@ MAX_BYTES = 256 * 1024
 TIMEOUT = 12
 MAX_QUERY = 200
 MAX_RESULTS = 5
+_CONNECT_SLOT = threading.BoundedSemaphore(1)
 PLANNER = (
     '通常ブラウザChatの公開Web検索が必要かを判定してください。応答はJSONだけで、'
     '{"query":"短い公開検索語"} または検索不要なら {"query":""}。'
@@ -31,6 +32,44 @@ PLANNER = (
 
 class SearchError(Exception):
     """Only stable public error codes; never include provider body, query, or key."""
+
+
+def _connect_before_send(conn, check, deadline):
+    """DNS/TLS worker never sees a query; at most one outstanding connect per process."""
+    check()
+    if not _CONNECT_SLOT.acquire(blocking=False):
+        raise SearchError('transport_busy')
+    done, abandoned = threading.Event(), threading.Event()
+    errors = []
+    def connect():
+        try:
+            conn.connect()
+        except Exception:
+            errors.append(True)
+        finally:
+            try:
+                if abandoned.is_set(): conn.close()
+            finally:
+                done.set()
+                _CONNECT_SLOT.release()
+    worker = threading.Thread(target=connect,daemon=True,name='chat-search-connect')
+    try: worker.start()
+    except RuntimeError:
+        _CONNECT_SLOT.release()
+        raise SearchError('transport_busy') from None
+    try:
+        while True:
+            check()
+            left = deadline-time.monotonic()
+            if left <= 0: raise SearchError('search_timeout')
+            if done.wait(min(.05,left)): break
+        check()
+        if time.monotonic() >= deadline: raise SearchError('search_timeout')
+        if errors: raise SearchError('provider_unavailable')
+    except BaseException:
+        abandoned.set()
+        conn.close()
+        raise
 
 
 def public_url(value):
@@ -93,6 +132,7 @@ def _text(value, limit):
 class WebSearch:
     def __init__(self, root):
         self.status = 'not_configured'
+        self.cascade = False
         path = root / 'config' / 'private-chat-web-search.json'
         if not path.exists():
             return
@@ -103,27 +143,58 @@ class WebSearch:
             if not cfg['enabled']:
                 self.status = 'disabled'
                 return
-            if cfg.get('provider') != 'tavily_keyless':
+            if cfg.get('provider') not in ('tavily_keyless','free_cascade'):
                 raise ValueError()
             # Never accept credentials or silently turn keyless usage into billed usage.
             if any(name in cfg for name in ('api_key', 'authorization', 'token')):
                 raise ValueError()
+            self.cascade = cfg['provider'] == 'free_cascade'
+            if self.cascade:
+                if not isinstance(cfg['searxng_url'],str): raise ValueError()
+                endpoint = urlsplit(cfg['searxng_url'])
+                if (endpoint.scheme != 'http' or not ipaddress.ip_address(endpoint.hostname).is_loopback
+                    or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment
+                    or endpoint.path != '/search' or not endpoint.port):
+                    raise ValueError()
+                self.searx_host, self.searx_port = endpoint.hostname, endpoint.port
             self.status = 'ready'
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, KeyError):
             self.status = 'configuration_error'
 
     @property
     def ready(self):
         return self.status == 'ready'
 
-    def search(self, query, check):
+    def search(self, query, check, evaluate=None, report=None):
         query = validate_query(query)
         check()
         if not self.ready:
             raise SearchError(self.status)
+        report = report or (lambda **_:None)
+        if self.cascade:
+            try:
+                rows = self._search('searxng',query,check)
+                check()
+                sufficient = bool(rows) and evaluate is not None and evaluate(rows) is True
+                check()
+                report(provider='searxng',status='sufficient' if sufficient else 'insufficient',count=len(rows))
+                if sufficient: return rows
+            except SearchError as exc:
+                report(provider='searxng',status='unavailable',error=str(exc),count=0)
+        check()
+        try:
+            rows = self._search('tavily_keyless',query,check)
+            report(provider='tavily_keyless',status='completed' if rows else 'no_results',count=len(rows))
+            return rows
+        except SearchError as exc:
+            report(provider='tavily_keyless',status='unavailable',error=str(exc),count=0)
+            raise
+
+    def _search(self, provider, query, check):
         deadline = time.monotonic() + TIMEOUT
         # Fixed official endpoint; no redirects, custom URLs, cookies, retries, or proxy env.
-        conn = http.client.HTTPSConnection(HOST, timeout=TIMEOUT)
+        conn = (http.client.HTTPConnection(self.searx_host,self.searx_port,timeout=TIMEOUT)
+                if provider == 'searxng' else http.client.HTTPSConnection(HOST, timeout=TIMEOUT))
         timed_out = threading.Event()
         active_socket = None
         def abort():
@@ -136,13 +207,20 @@ class WebSearch:
         timer.daemon = True
         timer.start()
         try:
-            body = json.dumps(dict(query=query,max_results=MAX_RESULTS,search_depth='basic',
-                                   auto_parameters=False,include_answer=False,include_raw_content=False,
-                                   include_images=False,safe_search=True)).encode('utf-8')
-            conn.request('POST', PATH, body=body,
-                         headers={'Accept': 'application/json', 'Accept-Encoding': 'identity',
-                                  'Content-Type':'application/json','X-Tavily-Access-Mode':'keyless',
-                                  'User-Agent': 'LocalBrainChat/1'})
+            _connect_before_send(conn,check,deadline)
+            check()
+            if timed_out.is_set() or time.monotonic() >= deadline:
+                raise SearchError('search_timeout')
+            headers = {'Accept':'application/json','Accept-Encoding':'identity','User-Agent':'LocalBrainChat/1'}
+            if provider == 'searxng':
+                body = urlencode(dict(q=query,format='json',language='auto',categories='general',safesearch=1)).encode()
+                headers['Content-Type'] = 'application/x-www-form-urlencoded'
+            else:
+                body = json.dumps(dict(query=query,max_results=MAX_RESULTS,search_depth='basic',
+                                       auto_parameters=False,include_answer=False,include_raw_content=False,
+                                       include_images=False,safe_search=True)).encode('utf-8')
+                headers.update({'Content-Type':'application/json','X-Tavily-Access-Mode':'keyless'})
+            conn.request('POST', PATH, body=body,headers=headers)
             active_socket = conn.sock
             response = conn.getresponse()
             if response.status == 429:
@@ -179,7 +257,7 @@ class WebSearch:
                     continue
                 seen.add(row['url'])
                 results.append(dict(url=row['url'], title=_text(row.get('title'), 200),
-                                    text=_text(row.get('content'), 1800), retrieved_at=retrieved))
+                                    text=_text(row.get('content'), 1800), retrieved_at=retrieved,provider=provider))
                 if len(results) == MAX_RESULTS:
                     break
             return results

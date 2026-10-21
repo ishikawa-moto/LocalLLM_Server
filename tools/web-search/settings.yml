@@ -1,0 +1,27 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - bing
+      - wikipedia
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: wikipedia
+    disabled: false
+general:
+  debug: false
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: POST
+search:
+  formats:
+    - json
+  safe_search: 1
+outgoing:
+  request_timeout: 4.0
+  max_request_timeout: 6.0

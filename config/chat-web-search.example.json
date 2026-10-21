@@ -1,4 +1,5 @@
 {
   "enabled": false,
-  "provider": "tavily_keyless"
+  "provider": "free_cascade",
+  "searxng_url": "http://__LOOPBACK_HOST__:__SEARXNG_PORT__/search"
 }

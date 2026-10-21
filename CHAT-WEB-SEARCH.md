@@ -1,28 +1,37 @@
 # Browser Chat public Web search
 
-通常ブラウザChat専用です。Slack、OCR、SecondBrain Reviewer、Agent v2、外部AIレビューの通信規則は変更しません。既存Qwenがローカルで検索要否と短い検索語を判定し、必要時だけChatがTavilyの公式Keyless Search APIを1回呼びます。回答生成もローカルQwenです。外部AIへのレビュー依頼や回答生成API呼出しはありません。検索サービス内部の処理方式を保証するものではありません。
+通常ブラウザChat専用です。基本は **自前SearXNG → 結果不足時だけTavily Keyless**。検索の要否、検索語、一次結果が質問を答える根拠として十分かはローカルQwenが判定します。回答もローカルQwenが生成します。選定根拠は[WEB-SEARCH-SELECTION.md](WEB-SEARCH-SELECTION.md)を参照してください。
 
 ## Local setup
 
-1. この実装はTavilyの無料・回数制限付きKeyless方式です。アカウント、API契約、APIキー、カード登録、追加常駐サービスは不要です。無料枠は無制限ではなく、提供条件・可用性はサービス側で変わる可能性があります。
-2. ServerPCで`config/chat-web-search.example.json`を`config/private-chat-web-search.json`へコピーします。`provider`は`tavily_keyless`のまま、`enabled`を`true`にします。この実設定はGit対象外です。APIキー・Authorization・Tokenの設定は受け付けません。
-3. 通常の保守手順でChatだけを再起動します。既存のGateway・Brain・モデル設定の変更は不要です。ブラウザを再読込すると「Web検索 ON（必要時）」が表示されます。未設定・無効時も通常会話は使えます。
+PC70に稼働するDocker/Podman互換環境が必要です。CLIの存在だけでは導入完了ではありません。新しい常駐サービス、Docker起動、Chat切替は固定候補を確認した保守操作として行います。
 
-公式Keyless仕様: https://docs.tavily.com/documentation/keyless
+1. `tools/web-search/Prepare-Searxng.ps1`を実行すると、未使用loopbackポート、ランダムなSearXNG内部secret、Chat用設定が`private-runtime`へ準備されます。既存の準備先は上書きしません。秘密値は表示せず、Dockerや現用環境は変更しません。既存の準備があれば先に観測して再利用してください。
+2. `tools/web-search`で構成を検証します。Dockerの設定出力に内部secretが含まれるため、`--quiet`を使い、展開済み設定を公開ログへ出しません。
 
-検索仕様: https://docs.tavily.com/documentation/api-reference/endpoint/search
+```powershell
+docker compose --env-file .\private-runtime\private-searxng.env -f .\compose.yaml config --quiet
+```
+
+3. 承認済みの保守操作で同じ構成を`up -d`します。先に同名containerがないか確認し、不明な既存containerは置換しません。公式イメージは公開registryのdigestへ固定しています。公開URLだけの検索試験と稼働資源を確認してから運用資格を記録します。CPU 1・メモリ512 MiBはcontainer上限の候補で、Docker/WSL本体の追加消費を含みません。未実測の容量・性能を保証しません。
+4. 準備した`private-chat-web-search.json`を、既知の旧状態と復元手順を確認してServerPCの`config`へ配置します。Chatだけを通常保守再起動し、ブラウザを再読込します。Gateway・Brain・既存モデル設定は変更しません。
+
+設定例は`config/chat-web-search.example.json`。`provider=free_cascade`と、同じPCの数値loopback IPを使う`http://.../search`だけを許可します。キー・Authorization・Tokenの設定は拒否します。第三者の公開SearXNGを勝手に利用しません。既存候補の`tavily_keyless`単独モードは互換用に残りますが、新しい標準運用は自前優先です。
 
 ## Behavior and boundaries
 
-- ブラウザのWeb検索がONのとき、現在のユーザー入力だけをローカルQwenの判定へ渡します。検索用判定は最大256出力トークン・60秒、検索は最大1回・5結果・256 KiB・12秒です。失敗を自動再試行しません。挨拶・文章変換など検索不要の判定なら外部通信は0です。
-- 外へ送るのは生成した検索語と固定の検索条件だけです。認証ヘッダー・Cookie・環境変数内のAPIキーは送りません。会話履歴、SecondBrain参考資料、OCR原本・結果、私有ファイルを検索APIへ渡す経路はありません。短い検索語にも個人情報を含む可能性はあるため、個人情報・社内情報を入力するときはWeb検索をOFFにしてください。高確度の鍵・メール・ローカルパス等は拒否しますが、これは一般的な個人情報除去の保証ではありません。
-- 通信先は固定のHTTPS公式APIです。任意URLの取得、ページ本文の取得、リダイレクト、環境変数proxy、Cookie、検索結果からの追加通信はありません。検索語・provider応答本文は運用ログへ記録しません。
-- 取得するのは検索結果の見出し・要約・URLです。外部AIによる回答生成は`include_answer=false`で無効とし、ページ全文・画像の取得も依頼しません。ページ全文を検証したことを意味しません。検索結果は信頼されない参考資料として既存context予算へ収めます。Web結果がある場合は参考資料予算の半分を予約し、SecondBrainが全枠を使い切ることを防ぎます。長いWeb要約は実トークン数を測って短縮します。資料中の指示は実行しません。
-- 回答は`[W1]`等で引用し、履歴の下に実際に渡したURLと見出しを表示します。取得日時はメタデータに残します。無料枠の制限は`rate_limited`として扱い、課金APIへの切替・自動契約・代理認証・制限回避をしません。失敗、結果なし、検索不要、OFFを区別し、未検索を検索成功とは表示しません。
-- 既存API呼出側は`web_search: true`を明示しない限り外部検索を行いません。未設定時に指定した場合は明示的エラーです。新規URL取得APIは公開しません。検索結果の知識自動採用は行いません。
+- Web ON時、現在のユーザー入力だけを検索用ローカル判定に渡します。履歴・SecondBrainの資料は検索語作成に使いません。
+- 一次SearXNGは1回。最大5結果を取得し、結果がある場合にローカルQwenが最大128出力トークン・45秒で追加検索の要否を判断します。0件、失敗、根拠不足・不確実の場合だけTavily Keylessへ同じ公開検索語で1回問い合わせます。追加検索は正確性の最終保証ではありません。
+- 検索用Qwenの計画は最大256出力トークン・60秒、各検索は最大256 KiB・12秒です。接続準備が遅延した場合も期限/取消を再確認するまで検索語を送信しません。接続処理の残存は最大1件に制限し、後から検索を再開しません。各推論は異なるGateway IDを使い、停止操作は全部を対象にします。
+- SearXNGはDuckDuckGo/Bing/Wikipediaの無料検索元に限定します。公式無料枠はTavily Keylessだけです。課金API、APIキー、Cookie、環境変数内のキーは使いません。無料枠の上限到達時は失敗を明示し、課金・購入・認証切替・制限回避を行いません。
+- 外へ送るのは短い公開検索語と固定検索条件です。会話履歴、SecondBrain参考資料、OCR原本・結果、私有ファイルを検索サービスへ送る経路はありません。ただし短い検索語にも個人情報が混じる可能性があるため、個人情報・社内情報を扱うときはWebをOFFにしてください。鍵・メール・パス等の高確度パターンは拒否しますが、一般的な個人情報除去の保証ではありません。OFFの選択はブラウザへ保存します。
+- Slack、OCR、Reviewer、Agent v2の通信規則は変更しません。外部AIへのレビューや回答生成は依頼しません。Tavilyは`include_answer=false`・全文/画像取得なしに固定し、検索サービス内部の処理方式を保証するものではありません。
+- 取得するのは見出し・要約・URLです。ページ全文や意味的真実を検証したことを意味しません。信頼されない参考資料として扱い、資料中の指示は実行しません。Web結果がある場合は参照予算の半分を確保し、長い要約は実トークン数に合わせて短縮します。
+- 回答は`[W1]`等で引用し、履歴へ実際に渡したURL・見出し・取得日時・検索providerと各試行状態を保存します。検索語・provider応答本文はChat運用ログへ記録しません。未検索を成功と表示しません。結果の自動知識採用は行いません。
+- 既存API側は`web_search:true`を指定しない限り検索しません。未設定で明示指定するとエラーです。新しい汎用URL取得APIは追加しません。
 
 ## Verification / rollback
 
-`python tests/run_public_tests.py`で公開fixtureのみを使い、通常Chatと検索分岐・禁止情報・失敗・cancel・予算・安全な出典を検証します。実モデルや秘密情報は不要です。実API疎通と配備後の公開Chat試験は別の実機証跡です。
+`python tests/run_public_tests.py`は公開fixture・試験用loopbackだけを使い、通常Chat、fallback順序、ローカル十分性判定、禁止検索語、遅延接続、停止、予算、課金用認証拒否を確認します。実検索・実Qwen・実containerの資格は別の実機証跡へ記録します。
 
-検索だけ無効化する場合は`private-chat-web-search.json`の`enabled`を`false`にし、Chatの通常保守再起動と画面再読込を行います。ソース復元が必要な場合は既知ハッシュとidleを確認し、今回変更したChatソース・画面だけを元へ戻します。DB、履歴、認証設定、Gateway、モデルを復元・削除しません。
+検索を無効にする場合はChat設定の`enabled=false`と通常保守再起動・画面再読込を行います。SearXNGを止める場合も所有containerのidentityを確認し、同じ固定Composeの`stop`だけを使います。他container・イメージ・volumeを一括削除しません。ソース復元が必要な場合は既知hashとidleを確認し、今回のChat対象だけを戻します。DB、履歴、認証、Gateway、モデルを復元・削除しません。

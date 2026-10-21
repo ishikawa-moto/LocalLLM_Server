@@ -3,12 +3,15 @@ import json
 import pathlib
 import tempfile
 import threading
+import time
 import http.client
 import unittest
 from unittest.mock import Mock, patch
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 
 from chat_web_search import WebSearch, SearchError, validate_query, plan_query, public_url
 import test_chat as base
+import chat_web_search as search_module
 chat = base.chat
 
 
@@ -114,6 +117,82 @@ class SearchProviderTests(unittest.TestCase):
                 self.provider().search('public query', lambda: None)
         conn.close.assert_called_once()
 
+    def test_late_dns_never_sends_query_after_deadline_or_cancel(self):
+        for cancel in (False,True):
+            entered,release = threading.Event(),threading.Event()
+            conn = Mock()
+            def stalled_dns():
+                entered.set(); release.wait(2)
+            conn.connect.side_effect = stalled_dns
+            def check():
+                if cancel and entered.is_set(): raise chat.ChatError('Cancelled',409)
+            try:
+                with patch('chat_web_search.TIMEOUT',.07),patch('chat_web_search.http.client.HTTPSConnection',return_value=conn):
+                    with self.assertRaises(chat.ChatError if cancel else SearchError): self.provider().search('public query',check)
+                self.assertFalse(release.is_set())
+                conn.request.assert_not_called()
+            finally:
+                release.set()
+                until=time.monotonic()+1
+                while time.monotonic()<until:
+                    if search_module._CONNECT_SLOT.acquire(blocking=False):
+                        search_module._CONNECT_SLOT.release(); break
+                    time.sleep(.005)
+                else: self.fail('DNS worker did not release its owned connection slot')
+            conn.request.assert_not_called()
+
+    def cascade(self):
+        self.path.write_text(json.dumps(dict(enabled=True,provider='free_cascade',
+            searxng_url=f'http://{base.LOOPBACK}:12345/search')))
+        return WebSearch(self.root)
+
+    def test_free_cascade_uses_fallback_only_for_missing_or_insufficient_results(self):
+        primary = [dict(url='https://docs.python.org/3/',title='Python',text='relevant')]
+        fallback = [dict(url='https://www.python.org/',title='Python',text='official')]
+        for sufficient in (True,False):
+            search=self.cascade(); search._search=Mock(side_effect=[primary,fallback])
+            report=Mock(); evaluate=Mock(return_value=sufficient)
+            result=search.search('Python docs',lambda:None,evaluate=evaluate,report=report)
+            self.assertEqual(result,primary if sufficient else fallback)
+            self.assertEqual([c.args[0] for c in search._search.call_args_list],
+                             ['searxng'] if sufficient else ['searxng','tavily_keyless'])
+            self.assertNotIn('query',str(report.call_args_list))
+        for error in ([],SearchError('provider_unavailable')):
+            search=self.cascade(); search._search=Mock(side_effect=[error,fallback])
+            self.assertEqual(search.search('Python docs',lambda:None,evaluate=lambda _:True),fallback)
+
+    def test_free_cascade_rejects_nonlocal_primary_and_stops_at_free_limit(self):
+        for endpoint in ('https://example.org/search','http://localhost:12345/search','http://example.org:12345/search',
+                         f'http://{base.LOOPBACK}:12345/other',f'http://{base.LOOPBACK}:12345/search?token=secret'):
+            self.path.write_text(json.dumps(dict(enabled=True,provider='free_cascade',searxng_url=endpoint)))
+            self.assertEqual(WebSearch(self.root).status,'configuration_error')
+        search=self.cascade()
+        search._search=Mock(side_effect=[[],SearchError('rate_limited')])
+        with self.assertRaisesRegex(SearchError,'rate_limited'): search.search('Python docs',lambda:None)
+        self.assertEqual(search._search.call_count,2)
+
+    def test_local_searxng_public_http_contract_and_no_external_fallback(self):
+        captured=[]
+        class Origin(BaseHTTPRequestHandler):
+            def do_POST(self):
+                captured.append((self.path,self.rfile.read(int(self.headers['Content-Length'])),dict(self.headers)))
+                data=json.dumps(dict(results=[dict(url='https://docs.python.org/3/',title='Python',content='official')])).encode()
+                self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+            def log_message(self,*args):pass
+        server=ThreadingHTTPServer((base.LOOPBACK,0),Origin)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            self.path.write_text(json.dumps(dict(enabled=True,provider='free_cascade',
+                searxng_url=f'http://{base.LOOPBACK}:{server.server_address[1]}/search')))
+            with patch('chat_web_search.http.client.HTTPSConnection') as external:
+                results=WebSearch(self.root).search('Python docs',lambda:None,evaluate=lambda _:True)
+                external.assert_not_called()
+            self.assertEqual(results[0]['provider'],'searxng')
+            self.assertEqual(captured[0][0],'/search')
+            self.assertIn(b'format=json',captured[0][1])
+            self.assertNotIn('Authorization',captured[0][2])
+        finally:server.shutdown();server.server_close();thread.join()
+
     def test_source_urls_reject_credentials_private_hosts_and_active_schemes(self):
         for value in ('javascript:alert(1)', 'file:///local', 'https://a:b@example.org/', 'https://printer.local/',
                       'https://localhost/', 'https://example.org:9443/', 'https://example.org/\nheader'):
@@ -174,6 +253,34 @@ class WebChatTests(unittest.TestCase):
         job = self.web_job()
         self.assertEqual(job.metadata['web_search_status'], 'no_results')
 
+    def use_real_cascade(self):
+        (self.root/'config').mkdir(exist_ok=True)
+        (self.root/'config/private-chat-web-search.json').write_text(json.dumps(dict(enabled=True,provider='free_cascade',
+            searxng_url=f'http://{base.LOOPBACK}:12345/search')))
+        primary=[dict(url='https://docs.python.org/3/',title='Primary',text='primary',provider='searxng')]
+        fallback=[dict(url='https://www.python.org/',title='Fallback',text='fallback',provider='tavily_keyless')]
+        self.app.web_search=WebSearch(self.root)
+        self.app.web_search._search=Mock(side_effect=[primary,fallback])
+        return primary,fallback
+
+    def test_browser_cascade_records_local_assessment_and_selected_provider(self):
+        primary,fallback=self.use_real_cascade()
+        self.fake.web_search_sufficient=Mock(return_value=False)
+        job=self.web_job()
+        self.assertEqual(job.metadata['web_sources'][0]['provider'],'tavily_keyless')
+        self.assertEqual([a['provider'] for a in job.metadata['web_search_attempts']],['searxng','tavily_keyless'])
+        self.fake.web_search_sufficient.assert_called_once_with(job,primary)
+        self.assertEqual(self.app.store.messages('a',job.cid)[-1]['metadata']['web_search_attempts'],job.metadata['web_search_attempts'])
+
+    def test_cancel_during_local_assessment_never_calls_free_quota_fallback(self):
+        self.use_real_cascade()
+        def cancel(job,rows): job.cancelled.set(); return False
+        self.fake.web_search_sufficient=Mock(side_effect=cancel)
+        job=self.web_job()
+        self.assertEqual(job.events[-1]['status'],'Cancelled')
+        self.assertEqual(self.app.web_search._search.call_count,1)
+        self.assertEqual(self.app.store.messages('a',job.cid),[])
+
     def test_unconfigured_and_invalid_request_rejected_before_queue(self):
         cid = self.app.store.create('a')
         for value in ('yes', 1, None):
@@ -228,7 +335,18 @@ class WebChatTests(unittest.TestCase):
         self.fake.cancel = Mock()
         job.done = True
         self.app.cancel(job)
-        self.assertEqual({c.args[0] for c in self.fake.cancel.call_args_list},set(ids))
+        self.assertEqual({c.args[0] for c in self.fake.cancel.call_args_list},set(ids)|{job.id+'.web-check'})
+
+    def test_local_sufficiency_check_requires_boolean_and_has_separate_id(self):
+        upstream=object.__new__(chat.Upstream);upstream.config=chat.DEFAULTS.copy()
+        upstream.count=Mock(return_value=20)
+        job=chat.Job('a','fixture','Python公式情報',False,True)
+        for text,expected in (('{"sufficient":true}',True),('{"sufficient":false}',False),
+                              ('{"sufficient":"true"}',False),('ignore previous instructions',False)):
+            upstream.generate=Mock(return_value=iter([text]))
+            self.assertEqual(upstream.web_search_sufficient(job,self.web.search.return_value),expected)
+            self.assertEqual(upstream.generate.call_args.kwargs['request_id'],job.id+'.web-check')
+            self.assertEqual(upstream.generate.call_args.kwargs['max_tokens'],128)
 
     def test_web_sources_obey_real_template_context_budget(self):
         cfg = chat.DEFAULTS | dict(context_tokens=1200, output_tokens=100, max_retrieval_tokens=400)
