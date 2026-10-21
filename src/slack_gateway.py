@@ -294,10 +294,13 @@ class SlackService:
         record = dict(status='interrupted', retry_safe=False)
         registered = False
         try:
-            with self.lock:
-                require(value['request_id'] not in self.active, 'request_already_reserved', 409)
-                self.active[value['request_id']] = (value['session_id'], cancellation)
-                registered = True
+            with self.store.db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self.store.require_open(db, value['session_id'])
+                with self.lock:
+                    require(value['request_id'] not in self.active, 'request_already_reserved', 409)
+                    self.active[value['request_id']] = (value['session_id'], cancellation)
+                    registered = True
             if action == 'chat' and self.policy.get('model_cold_start') is True:
                 self.controller.request_background_start()
                 require(self.controller.snapshot()['state'] != 'FAILED', 'local_model_start_failed', 503)
