@@ -49,4 +49,6 @@ ClientPCではZIPを展開し、`Setup-Client.cmd`をダブルクリックしま
 
 詳細は`client-package\README.md`と`OPERATIONS.md`を参照してください。
 
+通常ブラウザChatの公開Web検索の設定と制限は[CHAT-WEB-SEARCH.md](CHAT-WEB-SEARCH.md)を参照してください。
+
 公開文書と設定例の`SERVER_HOST`、`CLIENT_HOST`、`LAN_SUBNET`、`*_PORT`はプレースホルダーです。`config/site.example.json`を`config/private-site.json`へコピーし、ServerPCとClientPCの実アドレス、許可するネットワーク範囲、各サービスのポートへ置き換えてください。`*_port`には引用符を付けず、整数を指定します。実設定とprivate元データはGitHub公開対象外です。

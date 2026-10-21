@@ -2,3 +2,5 @@
 #delete{margin-left:auto;padding:6px 10px;font-size:12px;color:#efb9ac;white-space:nowrap}header strong{min-width:0}@media(max-width:700px){header{flex-wrap:wrap}header strong{flex:1}header label{width:100%;text-align:right}}
 
 #slack-approvals{color:inherit;padding:0.6rem 0}#slack-approvals[hidden]{display:none}
+
+.sources a{color:#9ad1c6;text-decoration:underline}.sources a:focus-visible{outline:2px solid currentColor}
