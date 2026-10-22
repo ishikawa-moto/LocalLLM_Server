@@ -559,6 +559,9 @@ class Handler(BaseHTTPRequestHandler):
                                                            "model_loaded": model_ready, "brain": healthy(site_port('brain')),
                                                            "proxy": listening(site_port('proxy')), "queue_depth": result["queued_jobs"],
                                                            "resources": resource_status()})
+            service = getattr(self.server, "slack_service", None)
+            result["restricted_activity"] = (service.activity_snapshot() if service is not None else
+                dict(available=False, quiescent=False, snapshot_only=True, admission_fenced=False))
             return self.send_json(200, result)
         if self.path == "/v1/brain/status": return self.proxy_internal(site_port('brain'), "/health", model=False)
         if self.path in ("/v1/models", "/models"): return self.proxy_internal(site_port('proxy'), "/v1/models", model=True)

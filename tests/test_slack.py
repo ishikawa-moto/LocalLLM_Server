@@ -158,9 +158,9 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual((result['status'],result['retry_safe'],result['reason']),('interrupted',False,'upstream_failure'))
         self.s.model=lambda *a: self.fail('must not retry')
         self.assertEqual(self.dispatch('chat',request()),result)
-    def test_restart_with_active_reservation_returns_interrupted(self):
+    def test_restart_with_active_reservation_returns_unresolved(self):
         v=request();self.s.store.reserve(v['request_id'],digest(dict(action='chat',value=v)),v['session_id'])
-        self.assertEqual(self.dispatch('chat',v),dict(status='interrupted',retry_safe=False))
+        self.assertEqual(self.dispatch('chat',v),dict(status='unresolved',retry_safe=False))
     def test_proposal_requires_same_session_and_completed_review(self):
         proposal=self.proposed()
         self.assertEqual(proposal['payload']['classification'],CLASSIFICATION)
@@ -315,6 +315,11 @@ class HTTPBoundaryTests(unittest.TestCase):
                 with patch.object(gateway,'CONFIG',config),patch.object(gateway,'resource_status',return_value={'accepting_jobs':True}):
                     self.assertEqual(call('GET','/v1/slack/capabilities')[0],200)
                     self.assertEqual(call('POST','/v1/slack/chat',request())[1]['status'],'complete')
+                    with patch.object(gateway,'CONTROLLER',c,create=True):
+                        status_code,observed=call('GET','/v1/control/status')
+                    self.assertEqual(status_code,200)
+                    self.assertTrue(observed['restricted_activity']['quiescent'])
+                    self.assertFalse(observed['restricted_activity']['admission_fenced'])
                     self.assertEqual(call('POST','/v1/slack/chat',request(),owner=False)[0],403)
                     self.assertEqual(call('POST','/v1/slack/chat?unexpected=1',request())[0],404)
                     self.assertEqual(call('POST','/v1/chat/completions',{'messages':[], 'restriction':RESTRICTION})[0],403)

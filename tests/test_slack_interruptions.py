@@ -152,7 +152,7 @@ class InterruptionMetadataTests(unittest.TestCase):
         service,_=self.service(lambda *a:self.fail('legacy active request must not retry'))
         value=request()
         service.store.reserve(value['request_id'],slack.digest(dict(action='chat',value=value)),value['session_id'])
-        self.assertEqual(service.execute('chat',value),dict(status='interrupted',retry_safe=False))
+        self.assertEqual(service.execute('chat',value),dict(status='unresolved',retry_safe=False))
 
     def test_safe_metadata_whitelist_rejects_unknown_fields_and_arbitrary_reasons(self):
         value=dict(reason='upstream_failure',diagnostics=dict(input_bytes=10,phase='generation',
