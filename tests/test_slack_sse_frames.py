@@ -17,6 +17,7 @@ def invoke(frames,lease=None):
   def request(self,*args):pass
   def getresponse(self):return Response()
   def abort(self):pass
+  def close_owned(self):self.abort()
  with patch.object(s,"CancellableConnection",Connection):
   return s.LoopbackModel("127.0.0.1",1,lambda:"PUBLIC-FAKE-KEY")([],8,5,lease or s.Lease(4))
 

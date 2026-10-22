@@ -145,7 +145,6 @@ class CancellableConnection(http.client.HTTPConnection):
         super().__init__(host, port, timeout=timeout)
         self.lease = lease
         self.original_socket = None
-        self.abort_socket = None
     def connect(self):
         self.lease.check()
         original_timeout = self.timeout
@@ -153,9 +152,6 @@ class CancellableConnection(http.client.HTTPConnection):
         try: super().connect()
         finally: self.timeout = original_timeout
         self.original_socket = self.sock
-        # Public socket.dup keeps a shutdown-capable handle even when HTTP/1.0
-        # transfers the original socket into HTTPResponse and closes its wrapper.
-        self.abort_socket = self.sock.dup()
         self.original_socket.settimeout(original_timeout)
         if self.lease.cancelled.is_set():
             self.abort()
@@ -164,13 +160,20 @@ class CancellableConnection(http.client.HTTPConnection):
         self.lease.check()
         return super().send(data)
     def abort(self):
-        try:
-            target = self.abort_socket or self.original_socket
-            if target is not None: target.shutdown(socket.SHUT_RDWR)
+        # Close only this owned raw loopback socket. detach prevents a later
+        # HTTPResponse wrapper close from closing a reused descriptor. Do not
+        # take its buffered-reader lock on a foreground/timer thread.
+        original = self.original_socket
+        if original is None: return
+        try: original.shutdown(socket.SHUT_RDWR)
         except OSError: pass
-        finally:
-            if self.abort_socket is not None: self.abort_socket.close()
-            self.close()
+        try:
+            handle = original.detach()
+            if handle >= 0: socket.close(handle)
+        except OSError: pass
+    def close_owned(self):
+        try: self.abort()
+        finally: super().close()
 
 class LoopbackModel:
     """Fixed loopback transport: no URL/tool options are accepted from callers."""
@@ -189,6 +192,9 @@ class LoopbackModel:
             timer.start()
             connection.request('GET', '/slots', headers={'Authorization':'Bearer '+self.key_loader()})
             response = connection.getresponse()
+            # Windows cannot always abort a read after HTTPResponse owns a closed
+            # HTTP/1.0 wrapper. Unsupported/closing probes are unknown, never idle.
+            if response.version != 11 or 'close' in response.getheader('Connection','').lower(): return False
             raw = response.read(262145)
             if response.status != 200 or len(raw)>262144: return False
             slots = strict_json(raw)
@@ -197,7 +203,7 @@ class LoopbackModel:
         except (OSError, ValueError, TypeError, http.client.HTTPException): return False
         finally:
             timer.cancel()
-            connection.abort()
+            connection.close_owned()
     def __call__(self, messages, max_tokens, timeout, lease):
         conn = CancellableConnection(self.host, self.port, timeout, lease)
         try:
@@ -234,7 +240,7 @@ class LoopbackModel:
             lease.check()
             if not done: raise ConnectionError('incomplete local generation')
             return ''.join(result)
-        finally: conn.abort()
+        finally: conn.close_owned()
 
 class RestrictedStore:
     """Separate database, never indexed/exported by normal Brain/TaskMemory paths."""

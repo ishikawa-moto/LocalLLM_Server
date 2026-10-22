@@ -58,15 +58,19 @@ if __name__=='__main__':unittest.main()
 
 
 class SlotProbeCancellationTests(unittest.TestCase):
- def run_probe(self,preempt):
+ def run_probe(self,preempt,version="HTTP/1.1"):
   import time
   from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
   from slack_gateway import LoopbackModel,Lease
   entered=threading.Event();release=threading.Event()
   class Handler(BaseHTTPRequestHandler):
+   protocol_version=version
    def do_GET(self):
     self.send_response(200);self.send_header('Content-Length','100');self.end_headers();entered.set();release.wait(5)
    def log_message(self,*args):pass
+   def handle(self):
+    try:super().handle()
+    except (ConnectionResetError,BrokenPipeError):pass # Expected cancellation of this public fixture socket.
   server=ThreadingHTTPServer((LOOPBACK,0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
   lease=Lease(4);model=LoopbackModel(LOOPBACK,server.server_port,lambda:'PUBLIC-KEY');result=[]
   started=time.monotonic();worker=threading.Thread(target=lambda:result.append(model.quiescent(lease)),daemon=True);worker.start();self.assertTrue(entered.wait(1))
@@ -77,3 +81,29 @@ class SlotProbeCancellationTests(unittest.TestCase):
   finally:release.set();server.shutdown();server.server_close();thread.join(2);worker.join(2)
  def test_probe_aborts_with_foreground_lease(self):self.run_probe(True)
  def test_probe_has_absolute_deadline(self):self.run_probe(False)
+
+ def test_http10_closing_probe_is_unknown_without_body_wait(self):self.run_probe(True,"HTTP/1.0")
+
+ def test_owned_descriptor_is_never_closed_twice(self):
+  import socket
+  from slack_gateway import Lease,CancellableConnection
+  original,peer=socket.socketpair();connection=CancellableConnection(LOOPBACK,1,2,Lease(4));connection.original_socket=original
+  try:
+   connection.abort();self.assertEqual(original.fileno(),-1)
+   with socket.socket() as fresh:
+    connection.abort();self.assertEqual(fresh.getsockopt(socket.SOL_SOCKET,socket.SO_TYPE),socket.SOCK_STREAM)
+  finally:connection.close_owned();peer.close()
+ def test_idle_slot_response_contract(self):
+  from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+  from slack_gateway import LoopbackModel,Lease
+  for data,expected in [(b'[{"id":0,"is_processing":false}]',True),(b'[{"id":0,"is_processing":true}]',False),(b'[]',False)]:
+   class Handler(BaseHTTPRequestHandler):
+    protocol_version='HTTP/1.1'
+    def do_GET(self):self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+    def log_message(self,*args):pass
+    def handle(self):
+     try:super().handle()
+     except (ConnectionResetError,BrokenPipeError):pass
+   server=ThreadingHTTPServer((LOOPBACK,0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+   try:self.assertIs(LoopbackModel(LOOPBACK,server.server_port,lambda:'PUBLIC-KEY').quiescent(Lease(4)),expected)
+   finally:server.shutdown();server.server_close();thread.join(2)
