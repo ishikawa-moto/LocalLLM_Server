@@ -1,5 +1,5 @@
 """Public stubs: no model, production database, credential, or Slack calls."""
-import tempfile,unittest,copy,threading
+import tempfile,unittest,copy,threading,json
 from pathlib import Path
 from test_slack import controller,request,PIN
 from slack_gateway import SlackService,SlackError,RESTRICTION,digest
@@ -19,6 +19,9 @@ class RecoveryTests(unittest.TestCase):
   previous=previous or self.root;new=dict(previous,request_id=next_id)
   return dict(logical_id=logical or self.root['request_id'],previous_request_id=previous['request_id'],previous_request_hash=digest(dict(action='chat',value=previous)),request=new,cause='priority_yield_lease',restriction=copy.deepcopy(RESTRICTION))
  def dispatch(self,value):return self.service.dispatch('/v1/slack/retry',value)
+ def test_shared_client_contract_hash(self):
+  value=json.loads((Path(__file__).parent/'fixtures/slack-recovery-contract.json').read_text(encoding='utf8'))
+  self.assertEqual(digest(dict(action='chat',value=value['request'])),value['request_hash'])
  def test_quiescence_required_before_new_reservation_or_model(self):
   self.model.idle=False;r=self.retry();self.assertEqual(self.dispatch(r),dict(status='deferred',retry_safe=True));self.assertEqual(self.model.calls,1)
   with self.service.store.db() as db:self.assertEqual(db.execute('SELECT count(*) FROM runs').fetchone()[0],1);self.assertEqual(db.execute('SELECT count(*) FROM retry_links').fetchone()[0],0)
