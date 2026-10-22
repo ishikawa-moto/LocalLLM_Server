@@ -6,9 +6,12 @@ This candidate changes only the local ServerPC Slack execution path and its publ
 
 The request's timeout_seconds remains an integer from 5 through 120. The server advertises chat_timeout_seconds=120 as its maximum. Chat execution uses:
 
-    min(requested_seconds, 120, 30 + 15 * ceil(max(0, UTF8_input_bytes - 2048) / 2048))
+    output_tokens = min(requested_max_tokens, 1024)
+    input_allowance = 30 + 15 * ceil(max(0, UTF8_input_bytes - 2048) / 2048)
+    output_allowance = 30 * ceil(output_tokens / 256)
+    min(requested_seconds, 120, max(input_allowance, output_allowance))
 
-Input bytes include context, the newline separator, and prompt; the 16,000-byte ceiling stays unchanged. Output stays capped at 1,024 model tokens. Small prompts receive at most 30 seconds, a synthetic 10,902-byte input receives at most 105 seconds, and the upper input boundary receives at most 120 seconds. A caller requesting 30 seconds still receives at most 30 seconds.
+Input bytes include context, the newline separator, and prompt; the 16,000-byte ceiling stays unchanged. Output stays capped at 1,024 model tokens. The output allowance avoids treating short OCR text or a short question as a cheap generation solely because the input is small: up to 256 output tokens retain a 30-second allowance, 257-512 receive 60, 513-768 receive 90, and 769-1024 receive 120, before the caller cap. For 64 output tokens a synthetic 10,902-byte input still receives at most 105 seconds; for 1,024 output tokens it receives at most 120. A caller requesting 30 seconds still receives at most 30 seconds. No model parameters or cold-start policy are changed; any startup/admission time within the operation consumes the same absolute deadline, not a separate extension.
 
 This is a bounded scheduling allowance, not a measured latency or successful-answer guarantee. Server and Client must agree on capabilities, the requested timeout, and the HTTP waiting allowance before cutover. An old Client that still requests or waits only 30 seconds will not benefit. The deadline is absolute across execution and review passes; review remains capped at 60 seconds total. Connected stream cancellation uses the existing owned socket; the numeric-loopback TCP connection attempt itself is capped at one second.
 
@@ -32,4 +35,4 @@ The authenticated status endpoint and an exact same-request replay return only s
 
 Public tests use synthetic input and stub/fixture transports only. They cover the byte/deadline boundaries, actual foreground socket interruption, explicit cancellation, first-cause retention, single background lease, legacy receipt behavior, replay/status metadata, delayed timer callbacks, and secret-bearing exception suppression.
 
-Production deployment, Gateway restart, model startup, real inference, original-request resubmission, and real Slack posting are outside preparation. Before a separate cutover approval, bind the exact source hashes, compare against the currently loaded historical Gateway/Slack sources as well as main, confirm Client timeout compatibility, preserve existing configuration and DB, obtain no-active/no-queued request maintenance confirmation, check fresh idle status, and prepare an owned-identity-only rollback. An independent review and actual deployment/integration validation have not been performed by this packet.
+Production deployment, Gateway restart, model startup, real inference, original-request resubmission, and real Slack posting are outside preparation. Before a separately authorized cutover, bind the exact source hashes, compare against the currently loaded Gateway/Slack sources as well as main, confirm Client timeout compatibility, preserve existing configuration and DB, obtain no-active/no-queued request maintenance confirmation, and check fresh idle status and process ownership. On failure preserve the current state for diagnosis; do not restore an old runtime/config or DB. An independent review and actual deployment/integration validation have not been performed by this packet.

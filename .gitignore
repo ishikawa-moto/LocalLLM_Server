@@ -92,3 +92,6 @@ Desktop.ini
 
 # Local originals containing personal or deployment information
 private-*
+
+# Local operational receipts and private audit artifacts
+/output/
