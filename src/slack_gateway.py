@@ -172,6 +172,19 @@ class LoopbackModel:
         except ValueError: loopback = False
         require(loopback, 'loopback_required')
         self.host, self.port, self.key_loader = host, port, key_loader
+    def quiescent(self):
+        # Metadata-only, fixed loopback GET. Never starts a model or exports slot data.
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=2)
+        try:
+            connection.request('GET', '/slots', headers={'Authorization':'Bearer '+self.key_loader()})
+            response = connection.getresponse()
+            raw = response.read(262145)
+            if response.status != 200 or len(raw)>262144: return False
+            slots = strict_json(raw)
+            # Recovery qualification is deliberately limited to the current single-slot setup.
+            return type(slots) is list and len(slots)==1 and type(slots[0]) is dict and slots[0].get('is_processing') is False
+        except (OSError, ValueError, TypeError, http.client.HTTPException): return False
+        finally: connection.close()
     def __call__(self, messages, max_tokens, timeout, lease):
         conn = CancellableConnection(self.host, self.port, timeout, lease)
         try:
@@ -233,6 +246,7 @@ class RestrictedStore:
               CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT, session_id TEXT NOT NULL, operation TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS proposals(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, nonce TEXT UNIQUE NOT NULL, request_id TEXT UNIQUE NOT NULL, hash TEXT NOT NULL, result TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS retry_links(previous_id TEXT PRIMARY KEY, next_id TEXT UNIQUE NOT NULL, root_id TEXT NOT NULL, attempt_index INTEGER NOT NULL);
               CREATE TABLE IF NOT EXISTS rule_state(id TEXT PRIMARY KEY, hash TEXT NOT NULL, payload TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS accepted(id TEXT PRIMARY KEY, payload TEXT NOT NULL, approval TEXT NOT NULL);
             ''')
@@ -269,7 +283,7 @@ class RestrictedStore:
             db.execute('UPDATE runs SET state=?,result=? WHERE id=?', (state, canonical(value).decode(), request_id))
 
 class SlackService:
-    POST_ROUTES = {'/v1/slack/chat', '/v1/slack/review', '/v1/slack/proposal', '/v1/slack/apply', '/v1/slack/cancel', '/v1/slack/status', '/v1/slack/retire'}
+    POST_ROUTES = {'/v1/slack/chat', '/v1/slack/review', '/v1/slack/proposal', '/v1/slack/apply', '/v1/slack/cancel', '/v1/slack/retry', '/v1/slack/status', '/v1/slack/retire'}
     def __init__(self, root, controller, model, client_ip, owner, policy, clock=time.time, resource_status=None):
         self.controller, self.model, self.client_ip, self.owner = controller, model, client_ip, owner
         self.policy, self.clock = policy, clock
@@ -302,7 +316,7 @@ class SlackService:
                     ordinary_secondbrain_adoption=False, automatic_adoption=False, rule_proposal=enabled,
                     rule_activation=enabled and self.policy.get('human_apply_enabled') is True, rule_targets=[RULE_TARGET], rule_values=RULE_VALUES,
                     external_ai=False, cloud_fallback=False, model_cold_start=enabled and self.policy.get('model_cold_start') is True, max_concurrency=1,
-                    chat_max_tokens=1024, chat_timeout_seconds=120, review_passes=2, review_timeout_seconds=60,
+                    chat_max_tokens=1024, chat_timeout_seconds=120, recovery_contract='quiescent-attempt-v1', recovery_max_attempts=3, review_passes=2, review_timeout_seconds=60,
                     classification=CLASSIFICATION)
     def dispatch(self, route, value):
         require(self.policy.get('enabled') is True, 'slack_disabled', 503)
@@ -314,6 +328,7 @@ class SlackService:
         if action == 'proposal': return self.proposal(value)
         if action == 'apply': return self.apply(value)
         if action == 'status': return self.status(value)
+        if action == 'retry': return self.retry(value)
         if action == 'retire': return self.retire(value)
         if action == 'cancel':
             fields(value, ('request_id', 'session_id', 'restriction'))
@@ -323,7 +338,18 @@ class SlackService:
                 if active and active[0] == value['session_id']: active[1].abort(); return dict(cancelled=True)
             return dict(cancelled=False)
         raise SlackError('endpoint_not_found', 404)
-    def execute(self, action, value):
+    def retry(self, value):
+        fields(value, ('logical_id','previous_request_id','previous_request_hash','request','cause','restriction'))
+        require(safe_id(value['logical_id']) and safe_id(value['previous_request_id']))
+        require(isinstance(value['previous_request_hash'],str) and HEX.fullmatch(value['previous_request_hash']))
+        require(value['cause'] in ('priority_yield_lease','priority_yield_probe_failed','priority_yield_legacy_blocked','priority_yield_legacy_unreadable','priority_yield_caller'), 'recovery_cause_denied')
+        request=value['request'];require(type(request) is dict and request.get('restriction')==RESTRICTION)
+        require(type(request['restriction'].get('cloudFallback')) is bool,'restriction_required',403)
+        require(request.get('request_id')!=value['previous_request_id'], 'attempt_identity_conflict')
+        previous=dict(request,request_id=value['previous_request_id'])
+        require(digest(dict(action='chat',value=previous))==value['previous_request_hash'], 'attempt_payload_changed',409)
+        return self.execute('chat', request, retry=value)
+    def execute(self, action, value, retry=None):
         keys = ('request_id', 'session_id', 'max_tokens', 'timeout_seconds', 'restriction')
         fields(value, (*keys, 'context', 'prompt') if action == 'chat' else (*keys, 'source'))
         require(safe_id(value['request_id']) and safe_id(value['session_id']))
@@ -359,14 +385,41 @@ class SlackService:
                     require(value['request_id'] not in self.active, 'request_already_reserved', 409)
                     self.active[value['request_id']] = (value['session_id'], cancellation)
                     registered = True
-            if action == 'chat' and self.policy.get('model_cold_start') is True:
+            if retry is None and action == 'chat' and self.policy.get('model_cold_start') is True:
                 self.controller.request_background_start()
                 require(self.controller.snapshot()['state'] != 'FAILED', 'local_model_start_failed', 503)
             passes = []
             for index in range(1 if action == 'chat' else 2):
                 with self.controller.background_job(4 if action == 'chat' else 5) as lease:
                     if not reserved:
-                        self.store.reserve(value['request_id'], request_hash, value['session_id'], action)
+                        if retry is None:
+                            self.store.reserve(value['request_id'], request_hash, value['session_id'], action)
+                        else:
+                            # Hold the existing controller inference semaphore while proving quiescence.
+                            probe=getattr(self.model,'quiescent',None)
+                            if probe is None or probe() is not True: raise Deferred()
+                            lease.check()
+                            with self.lock:
+                                if retry['previous_request_id'] in self.active: raise Deferred()
+                            with self.store.db() as db:
+                                db.execute('BEGIN IMMEDIATE')
+                                self.store.require_open(db,value['session_id'])
+                                self.store.require_fresh(db,'request',value['request_id'])
+                                prior=db.execute('SELECT hash,state,result,session_id,operation FROM runs WHERE id=?',(retry['previous_request_id'],)).fetchone()
+                                require(prior is not None and prior[0]==retry['previous_request_hash'] and prior[3]==value['session_id'] and prior[4]=='chat','attempt_binding_mismatch',409)
+                                if prior[1]!='interrupted': raise Deferred()
+                                saved=safe_interruption(strict_json(prior[2]))
+                                require(saved.get('reason') in ('explicit_cancel','foreground_preempted','background_preempted'),'attempt_terminal_reason_denied',409)
+                                link=db.execute('SELECT next_id FROM retry_links WHERE previous_id=?',(retry['previous_request_id'],)).fetchone()
+                                require(link is None,'attempt_already_linked',409)
+                                if retry['previous_request_id']==retry['logical_id']: attempt=1
+                                else:
+                                    parent=db.execute('SELECT root_id,attempt_index FROM retry_links WHERE next_id=?',(retry['previous_request_id'],)).fetchone()
+                                    require(parent is not None and parent[0]==retry['logical_id'],'attempt_chain_invalid',409)
+                                    attempt=parent[1]+1
+                                require(attempt<3,'attempt_limit',409)
+                                db.execute('INSERT INTO retry_links VALUES(?,?,?,?)',(retry['previous_request_id'],value['request_id'],retry['logical_id'],attempt))
+                                db.execute('INSERT INTO runs VALUES(?,?,?,NULL,?,?)',(value['request_id'],request_hash,'active',value['session_id'],'chat'))
                         reserved = True
                     cancellation.attach(lease)
                     remaining = end-time.monotonic()
@@ -472,7 +525,7 @@ class SlackService:
         if row[1] == 'complete': return dict(state='complete', request_hash=row[0], result=json.loads(row[2]), retry_safe=False)
         with self.lock: active = self.active.get(value['request_id'])
         state = 'running' if active is not None else ('interrupted' if row[1] == 'interrupted' else 'unresolved')
-        result = dict(state=state, request_hash=row[0], retry_safe=False)
+        result = dict(state=state, request_hash=row[0], retry_safe=False, recovery_contract='quiescent-attempt-v1')
         if state == 'interrupted' and row[2]:
             try: metadata = safe_interruption(json.loads(row[2]))
             except (ValueError, TypeError): metadata = {}
@@ -576,6 +629,7 @@ class SlackService:
                 db.executemany('INSERT INTO retired_ids VALUES (?,?,?)', [('proposal', item[0], sid) for item in remove_proposals])
                 db.executemany('INSERT INTO retired_ids VALUES (?,?,?)', [('request', item[0], sid) for item in remove_runs])
                 db.executemany('DELETE FROM proposals WHERE id=?', remove_proposals)
+                db.executemany('DELETE FROM retry_links WHERE previous_id=? OR next_id=?', [(r[0],r[0]) for r in remove_runs])
                 db.executemany('DELETE FROM runs WHERE id=?', remove_runs)
                 db.execute('INSERT OR IGNORE INTO retired_sessions VALUES (?,?)', (sid, int(self.clock())))
                 result = dict(status='retired', session_id=sid, request_id=rid, adopted_knowledge_preserved=True)
@@ -645,3 +699,4 @@ class SlackService:
             db.execute('INSERT INTO accepted VALUES (?,?,?)', (value['proposal_id'], row[1], canonical(approval).decode()))
             db.execute('INSERT INTO approvals VALUES (?,?,?,?,?)', (approval['approval_id'], approval['nonce'], value['request_id'], receipt_hash, canonical(result).decode()))
         return result
+

@@ -484,7 +484,7 @@ class DurableStatusTests(unittest.TestCase):
             value=request();query=dict(operation='chat',request_id=value['request_id'],session_id=value['session_id'],request_hash=digest(dict(action='chat',value=value)),restriction=RESTRICTION)
             self.assertEqual(fixture.dispatch('status',query)['state'],'unknown')
             fixture.s.store.reserve(value['request_id'],query['request_hash'],value['session_id'])
-            self.assertEqual(fixture.dispatch('status',query),dict(state='unresolved',request_hash=query['request_hash'],retry_safe=False))
+            self.assertEqual(fixture.dispatch('status',query),dict(state='unresolved',request_hash=query['request_hash'],retry_safe=False,recovery_contract='quiescent-attempt-v1'))
             self.assertFalse(fixture.calls)
             other=request(rid='request_completed_status')
             result=fixture.dispatch('chat',other)
@@ -537,3 +537,4 @@ class PersistenceIntegrityTests(unittest.TestCase):
         finally:fixture.tearDown()
 
 if __name__=='__main__':unittest.main()
+
