@@ -95,7 +95,8 @@ class ServiceTests(unittest.TestCase):
         result=self.dispatch('chat',v)
         self.assertEqual(result['classification'], CLASSIFICATION)
         self.assertEqual(self.calls[0][1],1024)
-        self.assertLessEqual(self.calls[0][2],30)
+        self.assertLessEqual(self.calls[0][2],120)
+        self.assertGreater(self.calls[0][2],115)
         self.assertEqual(len(self.calls[0][0]),2)
     def test_request_is_idempotent_and_changed_body_conflicts(self):
         v=request(); self.assertEqual(self.dispatch('chat',v),self.dispatch('chat',v)); self.assertEqual(len(self.calls),1)

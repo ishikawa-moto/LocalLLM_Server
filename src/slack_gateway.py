@@ -30,10 +30,12 @@ INTERRUPTION_REASONS = frozenset((
 LEASE_REASONS = INTERRUPTION_REASONS | {'lease_released'}
 
 
-def chat_deadline_seconds(input_bytes, requested):
+def chat_deadline_seconds(input_bytes, requested, max_tokens):
     # Bounded scheduling allowance, not a measured latency prediction.
     extra_blocks = (max(0, input_bytes - 2048) + 2047) // 2048
-    return min(requested, 120, 30 + 15 * extra_blocks)
+    input_allowance = 30 + 15 * extra_blocks
+    output_allowance = 30 * ((min(max_tokens, 1024) + 255) // 256)
+    return min(requested, 120, max(input_allowance, output_allowance))
 
 
 def safe_interruption(value):
@@ -340,7 +342,7 @@ class SlackService:
             return dict(status='deferred', retry_safe=True, reason='resource_limit_exceeded')
         limit = min(value['max_tokens'], 1024)
         input_bytes = len(source.encode('utf-8'))
-        timeout = (chat_deadline_seconds(input_bytes, value['timeout_seconds'])
+        timeout = (chat_deadline_seconds(input_bytes, value['timeout_seconds'], limit)
                    if action == 'chat' else min(value['timeout_seconds'], 60))
         started = time.monotonic()
         started_at_unix_ms = int(self.clock()*1000)
