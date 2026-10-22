@@ -145,6 +145,7 @@ class CancellableConnection(http.client.HTTPConnection):
         super().__init__(host, port, timeout=timeout)
         self.lease = lease
         self.original_socket = None
+        self.abort_socket = None
     def connect(self):
         self.lease.check()
         original_timeout = self.timeout
@@ -152,6 +153,9 @@ class CancellableConnection(http.client.HTTPConnection):
         try: super().connect()
         finally: self.timeout = original_timeout
         self.original_socket = self.sock
+        # Public socket.dup keeps a shutdown-capable handle even when HTTP/1.0
+        # transfers the original socket into HTTPResponse and closes its wrapper.
+        self.abort_socket = self.sock.dup()
         self.original_socket.settimeout(original_timeout)
         if self.lease.cancelled.is_set():
             self.abort()
@@ -161,9 +165,12 @@ class CancellableConnection(http.client.HTTPConnection):
         return super().send(data)
     def abort(self):
         try:
-            if self.original_socket is not None: self.original_socket.shutdown(socket.SHUT_RDWR)
+            target = self.abort_socket or self.original_socket
+            if target is not None: target.shutdown(socket.SHUT_RDWR)
         except OSError: pass
-        self.close()
+        finally:
+            if self.abort_socket is not None: self.abort_socket.close()
+            self.close()
 
 class LoopbackModel:
     """Fixed loopback transport: no URL/tool options are accepted from callers."""
@@ -172,10 +179,14 @@ class LoopbackModel:
         except ValueError: loopback = False
         require(loopback, 'loopback_required')
         self.host, self.port, self.key_loader = host, port, key_loader
-    def quiescent(self):
-        # Metadata-only, fixed loopback GET. Never starts a model or exports slot data.
-        connection = http.client.HTTPConnection(self.host, self.port, timeout=2)
+    def quiescent(self, lease):
+        # Metadata-only fixed loopback GET, bound to the same preemptible lease.
+        connection = CancellableConnection(self.host, self.port, 2, lease)
+        timer = threading.Timer(2, lease.abort, args=('background_unavailable',))
+        timer.daemon = True
         try:
+            lease.register(connection)
+            timer.start()
             connection.request('GET', '/slots', headers={'Authorization':'Bearer '+self.key_loader()})
             response = connection.getresponse()
             raw = response.read(262145)
@@ -184,7 +195,9 @@ class LoopbackModel:
             # Recovery qualification is deliberately limited to the current single-slot setup.
             return type(slots) is list and len(slots)==1 and type(slots[0]) is dict and slots[0].get('is_processing') is False
         except (OSError, ValueError, TypeError, http.client.HTTPException): return False
-        finally: connection.close()
+        finally:
+            timer.cancel()
+            connection.abort()
     def __call__(self, messages, max_tokens, timeout, lease):
         conn = CancellableConnection(self.host, self.port, timeout, lease)
         try:
@@ -397,7 +410,10 @@ class SlackService:
                         else:
                             # Hold the existing controller inference semaphore while proving quiescence.
                             probe=getattr(self.model,'quiescent',None)
-                            if probe is None or probe() is not True: raise Deferred()
+                            cancellation.attach(lease)
+                            try:
+                                if probe is None or probe(lease) is not True: raise Deferred()
+                            finally: cancellation.detach()
                             lease.check()
                             with self.lock:
                                 if retry['previous_request_id'] in self.active: raise Deferred()

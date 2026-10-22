@@ -6,7 +6,7 @@ from slack_gateway import SlackService,SlackError,RESTRICTION,digest
 from site_settings import LOOPBACK
 class Model:
  def __init__(self):self.calls=0;self.idle=True;self.fail=True
- def quiescent(self):return self.idle
+ def quiescent(self,lease):return self.idle
  def __call__(self,messages,tokens,timeout,lease):
   self.calls+=1
   if self.fail:lease.abort('explicit_cancel');lease.check()
@@ -55,3 +55,25 @@ class RecoveryTests(unittest.TestCase):
   finally:release.set();thread.join(3)
   self.assertFalse(thread.is_alive());self.assertEqual(result[0]['status'],'complete')
 if __name__=='__main__':unittest.main()
+
+
+class SlotProbeCancellationTests(unittest.TestCase):
+ def run_probe(self,preempt):
+  import time
+  from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+  from slack_gateway import LoopbackModel,Lease
+  entered=threading.Event();release=threading.Event()
+  class Handler(BaseHTTPRequestHandler):
+   def do_GET(self):
+    self.send_response(200);self.send_header('Content-Length','100');self.end_headers();entered.set();release.wait(5)
+   def log_message(self,*args):pass
+  server=ThreadingHTTPServer((LOOPBACK,0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+  lease=Lease(4);model=LoopbackModel(LOOPBACK,server.server_port,lambda:'PUBLIC-KEY');result=[]
+  started=time.monotonic();worker=threading.Thread(target=lambda:result.append(model.quiescent(lease)),daemon=True);worker.start();self.assertTrue(entered.wait(1))
+  try:
+   if preempt:lease.abort('foreground_preempted')
+   worker.join(3.5);self.assertFalse(worker.is_alive());self.assertEqual(result,[False]);self.assertLess(time.monotonic()-started,1.5 if preempt else 3.3)
+   if not preempt:self.assertGreater(time.monotonic()-started,1.5)
+  finally:release.set();server.shutdown();server.server_close();thread.join(2);worker.join(2)
+ def test_probe_aborts_with_foreground_lease(self):self.run_probe(True)
+ def test_probe_has_absolute_deadline(self):self.run_probe(False)
