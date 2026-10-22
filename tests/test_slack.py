@@ -154,7 +154,7 @@ class ServiceTests(unittest.TestCase):
     def test_interrupted_generation_is_never_silently_retried(self):
         self.s.model=lambda *a: (_ for _ in ()).throw(ConnectionError('secret source must not appear'))
         result=self.dispatch('chat',request())
-        self.assertEqual(result,dict(status='interrupted',retry_safe=False))
+        self.assertEqual((result['status'],result['retry_safe'],result['reason']),('interrupted',False,'upstream_failure'))
         self.s.model=lambda *a: self.fail('must not retry')
         self.assertEqual(self.dispatch('chat',request()),result)
     def test_restart_with_active_reservation_returns_interrupted(self):
@@ -263,7 +263,8 @@ class TransportTests(unittest.TestCase):
                 low.start();self.assertTrue(started.wait(2));begin=time.monotonic()
                 with c.job('foreground_fixture_01'):pass
                 low.join(2);self.assertFalse(low.is_alive());self.assertLess(time.monotonic()-begin,2)
-                self.assertEqual(results,[dict(status='interrupted',retry_safe=False)])
+                self.assertEqual(len(results),1)
+                self.assertEqual((results[0]['status'],results[0]['retry_safe'],results[0]['reason']),('interrupted',False,'foreground_preempted'))
                 self.assertTrue(disconnected.wait(2))
             finally:low.join(4);server.shutdown();server.server_close();thread.join(2)
 
@@ -337,7 +338,8 @@ class CancellationTests(unittest.TestCase):
             cancel['session_id']='session_fixture_01'
             self.assertTrue(s.dispatch('/v1/slack/cancel',cancel)['cancelled'])
             thread.join(2);self.assertFalse(thread.is_alive())
-            self.assertEqual(results,[dict(status='interrupted',retry_safe=False)])
+            self.assertEqual(len(results),1)
+            self.assertEqual((results[0]['status'],results[0]['retry_safe'],results[0]['reason']),('interrupted',False,'explicit_cancel'))
     def test_many_background_arrivals_never_overlap(self):
         c=controller();barrier=threading.Barrier(9);release=threading.Event();entered=[];failures=[]
         def work(index):

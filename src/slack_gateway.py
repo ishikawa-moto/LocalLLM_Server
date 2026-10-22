@@ -23,6 +23,39 @@ ID = re.compile(r'[A-Za-z0-9_-]{8,80}')
 HEX = re.compile(r'[0-9a-f]{64}')
 RULE_TARGET = 'slack-response-policy'
 RULE_VALUES = {'locale': ('ja', 'en'), 'style': ('brief', 'normal')}
+INTERRUPTION_REASONS = frozenset((
+    'deadline_exceeded', 'foreground_preempted', 'background_preempted',
+    'explicit_cancel', 'cancelled', 'transport_timeout', 'upstream_failure',
+    'invalid_output', 'background_unavailable', 'execution_failed'))
+LEASE_REASONS = INTERRUPTION_REASONS | {'lease_released'}
+
+
+def chat_deadline_seconds(input_bytes, requested):
+    # Bounded scheduling allowance, not a measured latency prediction.
+    extra_blocks = (max(0, input_bytes - 2048) + 2047) // 2048
+    return min(requested, 120, 30 + 15 * extra_blocks)
+
+
+def safe_interruption(value):
+    result = dict(status='interrupted', retry_safe=False)
+    if not isinstance(value, dict) or not isinstance(value.get('reason'),str) or value['reason'] not in INTERRUPTION_REASONS:
+        return result  # Legacy receipt: never invent a historical cause.
+    result['reason'] = value['reason']
+    raw = value.get('diagnostics', {})
+    if not isinstance(raw, dict): return result
+    limits = dict(input_bytes=(0,16000), max_tokens=(64,1024),
+                  requested_timeout_seconds=(5,120), deadline_seconds=(5,120),
+                  elapsed_ms=(0,3600000), started_at_unix_ms=(0,4102444800000),
+                  finished_at_unix_ms=(0,4102444800000))
+    diagnostics = {}
+    for key, (low, high) in limits.items():
+        v = raw.get(key)
+        if type(v) is int and low <= v <= high: diagnostics[key] = v
+    if raw.get('phase') in ('admission','generation','validation'):
+        diagnostics['phase'] = raw['phase']
+    result['diagnostics'] = diagnostics
+    return result
+
 
 class SlackError(Exception):
     def __init__(self, code, http=400): self.code, self.http = code, http
@@ -64,18 +97,29 @@ class Lease:
     def __init__(self, priority):
         self.priority = priority
         self.cancelled = threading.Event()
-        self.lock = threading.Lock()
-        self.transport = None
+        self.lock, self.state_lock = threading.Lock(), threading.Lock()
+        self.transport, self._reason = None, None
+    @property
+    def reason(self):
+        with self.state_lock: return self._reason
+    def cancel(self, reason='cancelled'):
+        # Mark cancellation without transport I/O while the controller lock is held.
+        reason = reason if reason in LEASE_REASONS else 'cancelled'
+        with self.state_lock:
+            if not self.cancelled.is_set():
+                self._reason = reason
+                self.cancelled.set()
     def check(self):
         if self.cancelled.is_set(): raise InterruptedError('restricted execution cancelled')
     def register(self, transport):
         with self.lock:
             self.check()
             self.transport = transport
-    def abort(self):
-        self.cancelled.set()
-        with self.lock:
-            if self.transport is not None: self.transport.abort()
+    def abort(self, reason='cancelled'):
+        self.cancel(reason)
+        with self.lock: transport = self.transport
+        # Closing a transport must never hold the registration/controller lock.
+        if transport is not None: transport.abort()
 
 class RunCancellation:
     def __init__(self):
@@ -84,14 +128,14 @@ class RunCancellation:
         with self.lock:
             self.lease = lease
             if self.cancelled.is_set():
-                lease.abort()
+                lease.abort('explicit_cancel')
                 raise InterruptedError('restricted run cancelled')
     def detach(self):
         with self.lock: self.lease = None
     def abort(self):
         self.cancelled.set()
         with self.lock:
-            if self.lease is not None: self.lease.abort()
+            if self.lease is not None: self.lease.abort('explicit_cancel')
 
 class CancellableConnection(http.client.HTTPConnection):
     """Remember the original socket after HTTPResponse takes ownership of it."""
@@ -101,8 +145,12 @@ class CancellableConnection(http.client.HTTPConnection):
         self.original_socket = None
     def connect(self):
         self.lease.check()
-        super().connect()
+        original_timeout = self.timeout
+        self.timeout = min(original_timeout, 1.0)
+        try: super().connect()
+        finally: self.timeout = original_timeout
         self.original_socket = self.sock
+        self.original_socket.settimeout(original_timeout)
         if self.lease.cancelled.is_set():
             self.abort()
             self.lease.check()
@@ -203,7 +251,9 @@ class RestrictedStore:
         if row is None: return None
         require(hmac.compare_digest(row[0], request_hash), 'request_id_conflict', 409)
         if row[1] == 'complete': return json.loads(row[2])
-        return dict(status='interrupted', retry_safe=False)
+        try: saved = json.loads(row[2]) if row[2] else None
+        except (ValueError, TypeError): saved = None
+        return safe_interruption(saved)
     def reserve(self, request_id, request_hash, session_id, operation='chat'):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -250,7 +300,7 @@ class SlackService:
                     ordinary_secondbrain_adoption=False, automatic_adoption=False, rule_proposal=enabled,
                     rule_activation=enabled and self.policy.get('human_apply_enabled') is True, rule_targets=[RULE_TARGET], rule_values=RULE_VALUES,
                     external_ai=False, cloud_fallback=False, model_cold_start=enabled and self.policy.get('model_cold_start') is True, max_concurrency=1,
-                    chat_max_tokens=1024, chat_timeout_seconds=30, review_passes=2, review_timeout_seconds=60,
+                    chat_max_tokens=1024, chat_timeout_seconds=120, review_passes=2, review_timeout_seconds=60,
                     classification=CLASSIFICATION)
     def dispatch(self, route, value):
         require(self.policy.get('enabled') is True, 'slack_disabled', 503)
@@ -289,8 +339,13 @@ class SlackService:
             # No reservation, model request or side effect has happened.
             return dict(status='deferred', retry_safe=True, reason='resource_limit_exceeded')
         limit = min(value['max_tokens'], 1024)
-        timeout = min(value['timeout_seconds'], 30 if action == 'chat' else 60)
-        end, reserved = time.monotonic()+timeout, False
+        input_bytes = len(source.encode('utf-8'))
+        timeout = (chat_deadline_seconds(input_bytes, value['timeout_seconds'])
+                   if action == 'chat' else min(value['timeout_seconds'], 60))
+        started = time.monotonic()
+        started_at_unix_ms = int(self.clock()*1000)
+        end, reserved = started+timeout, False
+        phase, interruption_reason, lease = 'admission', 'execution_failed', None
         cancellation = RunCancellation()
         record = dict(status='interrupted', retry_safe=False)
         registered = False
@@ -313,8 +368,10 @@ class SlackService:
                         reserved = True
                     cancellation.attach(lease)
                     remaining = end-time.monotonic()
-                    if remaining <= 0: raise TimeoutError()
-                    timer = threading.Timer(remaining, lease.abort)
+                    if remaining <= 0:
+                        lease.abort('deadline_exceeded')
+                        raise TimeoutError()
+                    timer = threading.Timer(remaining, lease.abort, args=('deadline_exceeded',))
                     timer.daemon = True
                     timer.start()
                     try:
@@ -332,8 +389,11 @@ class SlackService:
                             prompt = instruction+'\nSOURCE:\n'+source
                             if index: prompt += '\nCANDIDATE:\n'+passes[0]
                             messages = [dict(role='user', content=prompt)]
+                        phase = 'generation'
                         generated = self.model(messages, limit, remaining, lease)
+                        if time.monotonic() >= end: lease.abort('deadline_exceeded')
                         lease.check()
+                        phase = 'validation'
                         text(generated, 32768 if action == 'chat' else 8000)
                         passes.append(generated)
                     finally:
@@ -363,14 +423,34 @@ class SlackService:
                 record = dict(status='complete', candidate=candidate, review=review, review_hash=digest(review))
         except Deferred:
             if not reserved: return dict(status='deferred', retry_safe=True)
-        except SlackError: raise
-        except Exception:
-            # Fail closed; do not return model exception text, source, paths or keys.
-            pass
+            interruption_reason = 'background_unavailable'
+        except SlackError:
+            interruption_reason = 'invalid_output'
+            raise
+        except Exception as exc:
+            # Fixed restricted metadata only; never expose exception text or source.
+            if lease is not None and lease.reason in INTERRUPTION_REASONS:
+                interruption_reason = lease.reason
+            elif cancellation.cancelled.is_set():
+                interruption_reason = 'explicit_cancel'
+            elif time.monotonic() >= end:
+                interruption_reason = 'deadline_exceeded'
+            elif isinstance(exc, TimeoutError): interruption_reason = 'transport_timeout'
+            elif isinstance(exc, InterruptedError): interruption_reason = 'cancelled'
+            elif isinstance(exc, (OSError, http.client.HTTPException)): interruption_reason = 'upstream_failure'
+            elif isinstance(exc, (ValueError, TypeError)): interruption_reason = 'invalid_output'
+            else: interruption_reason = 'execution_failed'
         finally:
             if registered:
                 with self.lock: self.active.pop(value['request_id'], None)
-            if reserved: self.store.finish(value['request_id'], record)
+            if reserved:
+                if record['status'] == 'interrupted':
+                    record = safe_interruption(dict(reason=interruption_reason, diagnostics=dict(
+                        input_bytes=input_bytes, max_tokens=limit,
+                        requested_timeout_seconds=value['timeout_seconds'], deadline_seconds=timeout,
+                        elapsed_ms=min(3600000,max(0,int((time.monotonic()-started)*1000))),phase=phase,
+                        started_at_unix_ms=started_at_unix_ms,finished_at_unix_ms=int(self.clock()*1000))))
+                self.store.finish(value['request_id'], record)
         return record
     def status(self, value):
         fields(value, ('operation', 'request_id', 'session_id', 'request_hash', 'restriction'))
@@ -390,7 +470,13 @@ class SlackService:
         if row[1] == 'complete': return dict(state='complete', request_hash=row[0], result=json.loads(row[2]), retry_safe=False)
         with self.lock: active = self.active.get(value['request_id'])
         state = 'running' if active is not None else ('interrupted' if row[1] == 'interrupted' else 'unresolved')
-        return dict(state=state, request_hash=row[0], retry_safe=False)
+        result = dict(state=state, request_hash=row[0], retry_safe=False)
+        if state == 'interrupted' and row[2]:
+            try: metadata = safe_interruption(json.loads(row[2]))
+            except (ValueError, TypeError): metadata = {}
+            for key in ('reason','diagnostics'):
+                if key in metadata: result[key] = metadata[key]
+        return result
 
     @staticmethod
     def validate_delta(delta):

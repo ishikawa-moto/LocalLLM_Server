@@ -363,8 +363,8 @@ class LifecycleController:
             # Admission and background cancellation share the same lock. A new
             # low-priority request cannot overtake an admitted foreground request.
             background = self.background
-            if background is not None: background.cancelled.set()
-        if background is not None: background.abort()
+            if background is not None: background.cancel('foreground_preempted')
+        if background is not None: background.abort('foreground_preempted')
         self.audit("request_queued", request_id=request_id, **(metadata or {}))
         acquired = False; active_started = False
         terminal = "failed"
@@ -414,7 +414,7 @@ class LifecycleController:
         with self.condition:
             if self.background is not None and priority < self.background.priority:
                 previous = self.background
-                previous.cancelled.set()
+                previous.cancel('background_preempted')
             admitted = (previous is None and self.background is None
                         and self.active_jobs == 0 and self.queued_jobs == 0
                         and self.state == ModelState.READY and self.health(site_port('llm'))
@@ -426,14 +426,14 @@ class LifecycleController:
                 self.state = ModelState.BUSY
                 # Slack source/request/session identifiers never enter normal telemetry.
                 self.active_task = {"role": "restricted-background"}
-        if previous is not None: previous.abort()
+        if previous is not None: previous.abort('background_preempted')
         if not admitted: raise Deferred()
         try:
             yield lease
             lease.check()
         finally:
             try:
-                lease.abort()
+                lease.abort('lease_released')
             finally:
                 with self.condition:
                     self.background = None
