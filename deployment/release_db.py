@@ -169,6 +169,45 @@ def classify(before,current,migration=None):
         result['reason_code']=code if re.fullmatch('[A-Z_]+',code) else 'INVALID_COMPARISON_RECORD'
     return result
 
+FENCED_ADOPTION_KEYS=SEARCH_KEYS|frozenset(('duplicate_sources_avoided',))
+
+def operational_comparison(before,current):
+    """Preview only. No adoption: known monotonic three-counter changes, business exact."""
+    result=dict(policy='fenced-operational-metrics-v1',compatible=False,baseline_adopted=False,
+                before_aggregate_sha256=before.get('aggregate_sha256'),
+                current_aggregate_sha256=current.get('aggregate_sha256'))
+    try:
+        validate_snapshot(before);validate_snapshot(current)
+        a=before['databases']['index']['metrics_profile']['counters']
+        b=current['databases']['index']['metrics_profile']['counters']
+        require(set(a)==set(b),'METRICS_KEY_SET_DRIFT')
+        delta={key:b.get(key,0)-a.get(key,0) for key in FENCED_ADOPTION_KEYS}
+        require(all(v>=0 for v in delta.values()) and delta['search_hits']<=delta['search_requests'],'OPERATIONAL_COUNTER_DECREASE_OR_PAIR')
+        # Normalize only the three audited counters in a copy, then retain every exact guard.
+        normalized=copy.deepcopy(current);index=normalized['databases']['index']
+        counters=index['metrics_profile']['counters']
+        for key in FENCED_ADOPTION_KEYS&counters.keys():counters[key]=a[key]
+        index['tables']['metrics']=dict(rows=len(counters),typed_rows_sha256=row_digest(counters.items()))
+        index['logical_sha256']=digest({k:v for k,v in index.items() if k!='logical_sha256'})
+        normalized['aggregate_sha256']=digest(normalized['databases'])
+        exact=classify(before,normalized)
+        require(exact['compatible'],exact.get('reason_code','OPERATIONAL_BUSINESS_DRIFT'))
+        result.update(compatible=True,classification='KNOWN_OPERATIONAL_METRICS_ONLY_UNADOPTED',counter_deltas=delta)
+    except (ValueError,KeyError,TypeError) as exc:
+        code=str(exc);result['reason_code']=code if re.fullmatch('[A-Z_]+',code) else 'INVALID_OPERATIONAL_RECORD'
+    return result
+
+def adopt_fenced_metrics(before,current,reference,token):
+    require(type(reference)is str and len(reference.strip())>0,'ADOPTION_REFERENCE_REQUIRED')
+    require(type(token)is str and re.fullmatch('[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}',token) is not None,'FENCE_TOKEN_REQUIRED')
+    comparison=operational_comparison(before,current)
+    require(comparison['compatible'],comparison.get('reason_code','FENCED_ADOPTION_REFUSED'))
+    return dict(schema='localbrain.fenced-metrics-adoption.v1',status='FENCED_OPERATIONAL_METRICS_ADOPTED',
+                reference=reference,fence_token=token,fence_ownership_verified_by='caller',
+                source_baseline=before,observed_snapshot=current,adopted_baseline=copy.deepcopy(current),
+                comparison=comparison,producer_identity_proven=False,original_baseline_modified=False,
+                automatic_baseline_refresh=False)
+
 def validate_legacy_business(legacy,current):
     """Require exact old business records and a current strict known metrics profile."""
     validate_snapshot(current)
@@ -279,10 +318,10 @@ def load_verified(path,sha):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('--mode',choices=('Describe','Snapshot','Check','UpgradeLegacy','AdoptLegacyMetrics','Migrate'),default='Describe')
+    p.add_argument('--mode',choices=('Describe','Snapshot','Check','CheckBusiness','AdoptFencedMetrics','UpgradeLegacy','AdoptLegacyMetrics','Migrate'),default='Describe')
     p.add_argument('--root',type=Path);p.add_argument('--before',type=Path);p.add_argument('--before-sha256')
     p.add_argument('--migration',type=Path);p.add_argument('--migration-sha256')
-    p.add_argument('--adoption-reference')
+    p.add_argument('--adoption-reference');p.add_argument('--fence-token')
     a=p.parse_args()
     if a.mode=='Describe':
         print(json.dumps(dict(mode='Describe',database_writes=0,policy=METRICS_POLICY,search_delta_limit=SEARCH_DELTA_LIMIT)));return
@@ -292,7 +331,9 @@ def main():
         if a.mode=='Migrate':result=migrate(a.root,before['databases']['restricted'])
         else:
             current=snapshot_root(a.root)
-            if a.mode=='UpgradeLegacy':result=upgrade_legacy(before,current)
+            if a.mode=='AdoptFencedMetrics':result=adopt_fenced_metrics(before,current,a.adoption_reference,a.fence_token)
+            elif a.mode=='CheckBusiness':result=dict(current_snapshot=current,comparison=operational_comparison(before,current))
+            elif a.mode=='UpgradeLegacy':result=upgrade_legacy(before,current)
             elif a.mode=='AdoptLegacyMetrics':result=adopt_legacy_metrics(before,current,a.adoption_reference)
             else:
                 migration=load_verified(a.migration,a.migration_sha256) if a.migration else None

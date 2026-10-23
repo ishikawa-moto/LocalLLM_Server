@@ -70,9 +70,11 @@ The old v1/new v2 bytes, typed digests, explicit decision reference and receipt 
 
 ## Apply integration and alternatives
 
-Apply's Check reads the SHA-bound original baseline and, after migration only, the SHA-bound CreateNew migration-result.json. The restricted expected record can be replaced only by that validated migration.after; index counters still use the original baseline. Every result is appended to DatabaseChecks before rejection. HOLD saves the guard phase and a fixed public failure code, suppressing arbitrary/private exception text.
+For the new maintenance release, Prepare and pre-fence Apply perform only the full-evidence CheckBusiness preview. The existing bounded search classifier is unchanged. A separate explicit AdoptFencedMetrics may run once after native UAC under both physically owned producer protocols; RELEASE-MAINTENANCE-FENCE.md specifies its narrow three-counter predicate, business exactness, ordering and limitations.
 
-A formal producer fence would need explicit lifecycle/admission coordination for every producer. Holding the existing knowledge lock for an entire installation can block live searches until their 30-second timeout. A SQLite writer lock can similarly block producers and must span the relevant connection lifetime; releasing it reintroduces races. Neither is necessary for classifying this one bounded read-statistics pair. The selected predicate changes deployment evidence/qualification only and preserves running service availability, while all business content still has exact guards.
+The effective baseline is saved from those validated same-buffer bytes to a new CreateNew artifact with a separately checked SHA. Post-adoption Check never refreshes it, including after migration. The restricted expected record can be replaced only by the SHA-bound validated migration.after; index counters always remain anchored to that single effective baseline. Every comparison result is retained before refusal; HOLD saves the phase and a fixed public failure code while suppressing arbitrary/private exception text.
+
+A formal universal admission fence would require coordination for every possible writer. This operation uses only the two existing tracked producer protocols for a short critical section. It does not hold the knowledge byte lock over installation, native UAC waiting, Scheduler operations or network health probes. The cooperative budget and existing search timeout implications are explicitly documented.
 
 No historical metrics are deleted; no table is excluded; equal counts are never treated as content equality. A later schema/policy extension requires new source, fixtures, hashes and approval.
 
@@ -81,3 +83,7 @@ No historical metrics are deleted; no table is excluded; equal counts are never 
 Public fixtures execute actual Brain search/context/find functions and an isolated authenticated Brain HTTP server, actual Gateway status/heartbeat handler code with fixture authentication/network/resource stubs, all-table comparisons, adversarial schema/key/type/business changes, bounded legacy proof and Apply state guards. They use no production config, model, Slack post or original request.
 
 Native ACL/task execution and any production apply remain separate. The old b90 script, intent3452, execution receipt and expired GO remain immutable. A new commit, release manifest, intent and review are required before any new native UAC; parent owns GitHub main merge.
+
+## Separate short maintenance operation
+
+RELEASE-MAINTENANCE-FENCE.md specifies the separate, explicitly authorized one-time operational adoption under the existing two producer protocols. This supersedes the unfenced Apply/Prepare integration described above for the new release candidate only. The normal two-search-key/32 classifier, legacy failure evidence and immutable old baselines remain unchanged. Pre-fence preview never adopts; post-fence checks use one fixed SHA-bound effective baseline.

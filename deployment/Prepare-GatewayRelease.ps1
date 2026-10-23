@@ -62,7 +62,7 @@ $before=Get-Content -LiteralPath (Join-Path $Packet 'database-before.json') -Raw
 $helperBytes=GitBytes @('show',($ExpectedCommit+':deployment/release_db.py'))
 $baselinePath=Join-Path $Packet 'database-before.json'
 $baselineHash=FileHash $baselinePath
-$raw=& $python -I -B -c ([Text.Encoding]::UTF8.GetString($helperBytes)) --mode Check --root $DataRoot --before $baselinePath --before-sha256 $baselineHash
+$raw=& $python -I -B -c ([Text.Encoding]::UTF8.GetString($helperBytes)) --mode CheckBusiness --root $DataRoot --before $baselinePath --before-sha256 $baselineHash
 if($LASTEXITCODE){throw 'SNAPSHOT_FAILED'}
 $check=($raw -join [char]10)|ConvertFrom-Json
 NewJson (Join-Path $Packet 'database-preparation-check.json') $check
@@ -85,6 +85,11 @@ foreach($b in $base){
  if($ids.Count -ne @($b.processes).Count){throw 'BASE_LISTENER_DRIFT'}
  foreach($p in $b.processes){if($p.pid -notin $ids -or (Get-CimInstance -Query ('SELECT CreationDate FROM Win32_Process WHERE ProcessId='+$p.pid)).CreationDate.ToFileTimeUtc().ToString() -ne $p.birth_filetime){throw 'BASE_BIRTH_DRIFT'}}
 }
+$knowledgePath=GuardPath (Join-Path $DataRoot 'runtime\knowledge-transaction.lock') $DataRoot
+$knowledgeItem=Get-Item -LiteralPath $knowledgePath
+if($knowledgeItem.Length -ne 1){throw 'EXISTING_KNOWLEDGE_LOCK_REQUIRED'}
+$knowledgeBinding=@{path='runtime/knowledge-transaction.lock';sha256=FileHash $knowledgePath;
+ acl_sha256=TextHash (Get-Acl -LiteralPath $knowledgePath).Sddl;creation_filetime=$knowledgeItem.CreationTimeUtc.ToFileTimeUtc().ToString()}
 $databaseFiles=@()
 foreach($relative in @('runtime/slack-restricted/state.sqlite3','runtime/gateway-jobs.sqlite3','runtime/chat.sqlite3','runtime/index.sqlite3','runtime/semantic.sqlite3')){
  $p=GuardPath (Join-Path $DataRoot $relative) $DataRoot;$item=Get-Item -LiteralPath $p
@@ -115,6 +120,7 @@ $prodArgs=@('--no-optional-locks','-c',('safe.directory='+$DataRoot.Replace('\',
 $productionHead=@(& git @prodArgs rev-parse HEAD);if($LASTEXITCODE){throw 'PRODUCTION_HEAD_FAILED'}
 $knownStatus=@(& git @prodArgs status --porcelain --untracked-files=all);if($LASTEXITCODE){throw 'PRODUCTION_STATUS_FAILED'}
 $intent=@{schema='localbrain.gateway-release-intent.v1';packet=$Packet;data_root=$DataRoot;program_root='C:\ProgramData\LocalBrainServer';database_policy='index-search-counters-v1';
+ maintenance_policy='fenced-operational-metrics-v1';fenced_adoption_reference=('fenced-operational-metrics-v1:'+$ExpectedCommit);knowledge_lock_binding=$knowledgeBinding;
  source_commit=$ExpectedCommit;manifest_sha256=FileHash (Join-Path $Packet 'release-manifest.json');script_sha256=FileHash (Join-Path $payload 'deployment\Apply-GatewayRelease.ps1');
  python=$python;python_sha256=FileHash $python;dependency_files=$dependencies;automatic_restore=$false;admin_image_inspection_required=$true;
  production_head=$productionHead[0];production_index_sha256=FileHash (Join-Path $DataRoot '.git\index');known_git_status=$knownStatus;
