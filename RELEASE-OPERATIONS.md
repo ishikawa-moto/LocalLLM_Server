@@ -40,7 +40,7 @@ Only the restricted store receives additive DDL:
         attempt_index INTEGER NOT NULL
     )
 
-The primary/unique constraints create the two implicit indexes. Existing table rows and user_version must remain unchanged. An existing retry table is accepted only for the exact known DDL, columns, two nonpartial implicit unique indexes and absence of triggers/FKs/unknown objects. Unexpected schema, busy/unknown state or baseline drift holds the operation. No general DB initialization or history reclassification is part of migration.
+The primary/unique constraints create the two implicit indexes. Existing table rows and user_version must remain unchanged. An existing retry table is accepted only for the exact known DDL, columns, two nonpartial implicit unique indexes and absence of triggers/FKs/unknown objects. Unexpected schema, busy/unknown state or unclassified baseline drift holds the operation. Full DB v2 evidence permits only the fixed index-search-counters-v1 predicate described in METRICS-DEPLOYMENT-CONTRACT.md: all business rows stay exact, the complete known metrics profile is bound to its full typed digest, and only the original-baseline cumulative search pair may increase within 32. All other changes HOLD. Passing checks never refresh the baseline. No general DB initialization or history reclassification is part of migration.
 
 A failure before SQLite commit rolls back only that uncommitted transaction. After commit, later failure preserves the additive schema and current state; no backup DB or historical runtime is restored.
 
@@ -50,7 +50,7 @@ Apply-GatewayRelease.ps1 defaults to Describe; Inspect is read-only. Apply requi
 
 No GO record is generated during preparation. Parent sends the actual GO after observing the final hashes. Native Windows UAC must then be requested once through the legitimate consent prompt; this procedure neither clicks nor bypasses it. Normal sandbox escalation is not a substitute for that consent.
 
-The elevated operation first reads the live SYSTEM image/command line and scheduler parent and matches them to the fixed task/GUID/PID/birth binding. It fails before stop if those remain unknown. Config/dependencies/source hashes, file ownership, full DB digests, current idle and protected service identities are rechecked. No separate read-only UAC is needed when the same bounded Apply preflight can establish the image identity.
+The elevated operation first reads the live SYSTEM image/command line and scheduler parent and matches them to the fixed task/GUID/PID/birth binding. It fails before stop if those remain unknown. Config/dependencies/source hashes, file ownership, full DB snapshots with the strict classified search-pair predicate, current idle and protected service identities are rechecked. No separate read-only UAC is needed when the same bounded Apply preflight can establish the image identity.
 
 ## Apply sequence and failure handling
 
@@ -58,7 +58,7 @@ The elevated operation first reads the live SYSTEM image/command line and schedu
 2. Verify GO, fixed assets, old task/image identity, source/config/DB baselines and idle/base services. Save the receipt durably.
 3. Install and verify the new code-only ProgramData release and permissions while the old Gateway still runs.
 4. Save stop intent; stop only the exact owned Gateway instance. Wait for Ready, zero instances and zero listener. Never kill an unknown process.
-5. Recheck all five DBs. Run the single additive restricted migration and verify every previous row/table and unchanged other DBs.
+5. Recheck all five DBs. Run the single additive restricted migration and verify every previous business row/table and classify the bounded original-baseline search counters in full retained evidence.
 6. Update only the known Gateway task action, preserving its security/settings/principal. Save the new task definition binding.
 7. Before one Run, verify Brain health, Proxy listener, protected identities and post-migration DB baseline again.
 8. Save the Run attempt before calling it, then durably save its returned instance GUID before observing PID/birth/health. Bind a new identity once; never adopt a replacement or retry Run.

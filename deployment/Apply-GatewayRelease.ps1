@@ -58,7 +58,7 @@ if($ApprovedIntentSha256 -notmatch '^[a-f0-9]{64}$' -or $intentHash -ne $Approve
 $intent=Get-Content -LiteralPath $intentPath -Raw|ConvertFrom-Json
 $root=$intent.data_root
 if($intent.schema -ne 'localbrain.gateway-release-intent.v1' -or $intent.packet -ne $packet -or (FileHash $PSCommandPath) -ne $intent.script_sha256 -or
- $intent.program_root -ne 'C:\ProgramData\LocalBrainServer' -or $intent.automatic_restore -cne $false -or
+ $intent.program_root -ne 'C:\ProgramData\LocalBrainServer' -or $intent.automatic_restore -cne $false -or $intent.database_policy -ne 'index-search-counters-v1' -or
  @($intent.tasks).Count -ne 1 -or $intent.tasks[0].task -ne 'LocalBrain Control Gateway'){throw 'FIXED_SCOPE_DRIFT'}
 $script:taskXmlHash=$intent.tasks[0].definition_xml_sha256
 $script:taskArgsHash=$intent.tasks[0].arguments_sha256
@@ -121,10 +121,25 @@ function InvokePinned([string]$relative,[string[]]$arguments){
  return (($raw -join [char]10)|ConvertFrom-Json -AsHashtable)
 }
 function AssertDbState($record){
- $current=InvokePinned 'deployment/release_db.py' @('--mode','Snapshot','--root',$root)
- $expected=if($record.DatabaseAfterMigration){$record.DatabaseAfterMigration}else{$record.DatabaseBefore}
- if($current.aggregate_sha256 -ne $expected.aggregate_sha256){throw 'DATABASE_LOGICAL_STATE_DRIFT_NO_RESTORE'}
- $record.LastDatabaseCheck=$current
+ $arguments=@('--mode','Check','--root',$root,'--before',(Join-Path $packet 'database-before.json'),'--before-sha256',$intent.database_before_sha256)
+ if($record.MigrationArtifact){$arguments+=@('--migration',$record.MigrationArtifact.path,'--migration-sha256',$record.MigrationArtifact.sha256)}
+ $observed=InvokePinned 'deployment/release_db.py' $arguments
+ $record.LastDatabaseCheck=$observed.current_snapshot
+ $record.LastDatabaseComparison=$observed.comparison
+ $record.DatabaseChecks=@($record.DatabaseChecks)+@($observed)
+ if($observed.comparison.compatible -cne $true){throw 'DATABASE_POLICY_COMPARISON_HELD_NO_RESTORE'}
+}
+function SaveMigrationArtifact($migration){
+ $p=SafePath (Join-Path $packet 'migration-result.json') $packet
+ $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($migration|ConvertTo-Json -Depth 20)+[char]10)
+ $f=[IO.FileStream]::new($p,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+ try{$f.Write($bytes);$f.Flush($true)}finally{$f.Dispose()}
+ return @{path=$p;sha256=FileHash $p}
+}
+function PublicFailureCode($failure){
+ $message=$failure.Exception.Message
+ if($message -cmatch '^[A-Z][A-Z_]{2,100}$'){return $message}
+ return 'PRIVATE_ERROR_MESSAGE_SUPPRESSED'
 }
 function AssertIdle($record){
  AssertMaintenance
@@ -300,21 +315,20 @@ try{
  $baseline=Get-Content -LiteralPath (Join-Path $packet 'database-before.json') -Raw|ConvertFrom-Json -AsHashtable
  $record=@{Schema='localbrain.gateway-release-execution.v1';Phase='preflight';IntentSha256=$intentHash;ScriptSha256=$intent.script_sha256;
  BeforeTasks=@($initial);BaseListeners=@($intent.base_listeners);DatabaseBefore=$baseline;DatabaseAfterMigration=$null;
- OwnedStarts=@();StoppedTasks=@();TaskUpdated=$false;ExplicitModelRequests=0;AutomaticRestore=$false;ParentGoSha256=$ParentGoSha256}
- $record.AdminBeforeImage=AssertAdminImage $initial
- AssertBase $record;AssertIdle $record;SaveReceipt $record
+ OwnedStarts=@();StoppedTasks=@();TaskUpdated=$false;DatabaseChecks=@();MigrationArtifact=$null;ExplicitModelRequests=0;AutomaticRestore=$false;ParentGoSha256=$ParentGoSha256}
+ $record.Phase='preflight-admin-image';$record.AdminBeforeImage=AssertAdminImage $initial
+ $record.Phase='preflight-protected-listeners';AssertBase $record
+ $record.Phase='preflight-idle-and-database';AssertIdle $record;SaveReceipt $record
  InstallRelease $record
  StopExact $record 'gateway'
  AssertReadyForStart $record 'gateway';AssertDbState $record
  $record.Phase='additive-migration-requested';SaveReceipt $record
  $migration=InvokePinned 'deployment/release_db.py' @('--mode','Migrate','--root',$root,'--before',(Join-Path $packet 'database-before.json'),'--before-sha256',$intent.database_before_sha256)
  if($migration.status -ne 'ADDITIVE_MIGRATION_VERIFIED' -or $migration.existing_rows_unchanged -cne $true){throw 'MIGRATION_NOT_VERIFIED'}
- $after=InvokePinned 'deployment/release_db.py' @('--mode','Snapshot','--root',$root)
- foreach($label in @('restricted','gateway','chat','index','semantic')){
-  $expected=if($label -eq 'restricted'){$migration.after.logical_sha256}else{$baseline.databases[$label].logical_sha256}
-  if($after.databases[$label].logical_sha256 -ne $expected){throw 'POST_MIGRATION_UNEXPECTED_DB_CHANGE'}
- }
- $record.Migration=$migration;$record.DatabaseAfterMigration=$after;$record.Phase='migration-committed-existing-rows-preserved';SaveReceipt $record
+ $record.Migration=$migration;$record.MigrationArtifact=SaveMigrationArtifact $migration
+ $record.Phase='post-migration-classification';AssertDbState $record
+ $record.DatabaseAfterMigration=$record.LastDatabaseCheck
+ $record.Phase='migration-committed-existing-rows-preserved';SaveReceipt $record
  UpdateTask $record
  StartExact $record 'gateway'
  AssertMaintenance;AssertAssets;AssertProtected;AssertKnownFiles;AssertBase $record;AssertIdle $record
@@ -322,6 +336,6 @@ try{
  $record.Phase='SERVER_DEPLOYED_AWAITING_CLIENT_HOST_QUALIFICATION';SaveReceipt $record
  @{status=$record.Phase;receipt_sha256=FileHash $receiptPath;source_commit=$intent.source_commit;automatic_restore=$false;model_requests=0}|ConvertTo-Json
 }catch{
- if($record){$record.FailedPhase=$record.Phase;$record.Phase='HOLD_PRESERVE_CURRENT_STATE_NO_AUTOMATIC_RESTORE';try{SaveReceipt $record}catch{}}
+ if($record){$record.FailureCode=PublicFailureCode $_;$record.FailedPhase=$record.Phase;$record.Phase='HOLD_PRESERVE_CURRENT_STATE_NO_AUTOMATIC_RESTORE';try{SaveReceipt $record}catch{}}
  throw 'RELEASE_APPLY_HELD_INSPECT_OWNED_RECEIPT_NO_RETRY'
 }finally{$mutex.ReleaseMutex();$mutex.Dispose()}
