@@ -1,6 +1,7 @@
 param([ValidateSet('immediate','daily')][string]$Mode='daily')
 $ErrorActionPreference='Stop'
-$taskRoot=$PSScriptRoot
+$taskCodeRoot=$PSScriptRoot
+$taskRoot=if($env:LOCALBRAIN_DATA_ROOT){$env:LOCALBRAIN_DATA_ROOT}else{$PSScriptRoot}
 $taskPython=[string](Get-Content -LiteralPath (Join-Path $taskRoot 'config\python-runtime.json') -Raw | ConvertFrom-Json).executable
 if(-not (Test-Path -LiteralPath $taskPython -PathType Leaf)){exit 1}
 $taskId=[Guid]::NewGuid().ToString('N')
@@ -8,7 +9,7 @@ $taskOut=Join-Path $taskRoot ('runtime\draft-review-'+$taskId+'.out')
 $taskErr=Join-Path $taskRoot ('runtime\draft-review-'+$taskId+'.err')
 $taskCode=1
 try {
-    $taskArgs=@('-B',('"'+(Join-Path $taskRoot 'src\draft_review_queue.py')+'"'),'--root',('"'+$taskRoot+'"'))
+    $taskArgs=@('-B',('"'+(Join-Path $taskCodeRoot 'src\draft_review_queue.py')+'"'),'--root',('"'+$taskRoot+'"'))
     $taskChild=Start-Process -FilePath $taskPython -ArgumentList $taskArgs -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $taskOut -RedirectStandardError $taskErr
     $taskCode=$taskChild.ExitCode
     $taskResult=Get-Content -LiteralPath $taskOut -Raw | ConvertFrom-Json

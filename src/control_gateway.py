@@ -22,11 +22,12 @@ from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from site_settings import site_value
+from site_settings import site_value, ROOT as DATA_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = DATA_ROOT
+CODE_ROOT = Path(__file__).resolve().parents[1]
 APPROVAL_OWNER = site_value("host_owner", "ClientPC-windows-host", ROOT)
-MANAGER = ROOT / "Manage-LocalBrain.ps1"
+MANAGER = CODE_ROOT / "Manage-LocalBrain.ps1"
 TLS = ROOT / "config" / "tls"
 LOG = ROOT / "logs" / "audit.jsonl"
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
@@ -555,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200 if result else 404, result or {"error": "job not found"})
         if self.path in ("/health", "/v1/control/status", "/control/status"):
             model_ready = healthy(site_port('llm'))
-            result = CONTROLLER.snapshot(); result.update({"gateway": "ok", "model_server": model_ready,
+            result = CONTROLLER.snapshot(); result.update({"release_commit": os.environ.get("LOCALBRAIN_RELEASE_COMMIT"), "gateway": "ok", "model_server": model_ready,
                                                            "model_loaded": model_ready, "brain": healthy(site_port('brain')),
                                                            "proxy": listening(site_port('proxy')), "queue_depth": result["queued_jobs"],
                                                            "resources": resource_status()})
