@@ -4,6 +4,7 @@ param([ValidateSet('Describe','Prepare')][string]$Mode='Describe',[string]$Candi
 $ErrorActionPreference='Stop'
 if($Mode -eq 'Describe'){@{mode='Describe';production_writes=0;task_operations=0;database_writes=0;staging_only=$true}|ConvertTo-Json;exit 0}
 function FileHash($p){(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant()}
+function AssertBaselineBinding([string]$p,[string]$expected){if((FileHash $p) -ne $expected){throw 'BASELINE_CHANGED_DURING_PREPARE_HOLD'}}
 function TextHash([string]$v){[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($v))).ToLowerInvariant()}
 function GuardPath([string]$p,[string]$base){
  $p=[IO.Path]::GetFullPath($p);$base=[IO.Path]::GetFullPath($base).TrimEnd('\')
@@ -59,10 +60,13 @@ foreach($b in $old.configured_dependency_files){
 $before=Get-Content -LiteralPath (Join-Path $Packet 'database-before.json') -Raw|ConvertFrom-Json
 # Execute the exact immutable commit bytes, never reopen a mutable helper path.
 $helperBytes=GitBytes @('show',($ExpectedCommit+':deployment/release_db.py'))
-$raw=& $python -I -B -c ([Text.Encoding]::UTF8.GetString($helperBytes)) --mode Snapshot --root $DataRoot
+$baselinePath=Join-Path $Packet 'database-before.json'
+$baselineHash=FileHash $baselinePath
+$raw=& $python -I -B -c ([Text.Encoding]::UTF8.GetString($helperBytes)) --mode Check --root $DataRoot --before $baselinePath --before-sha256 $baselineHash
 if($LASTEXITCODE){throw 'SNAPSHOT_FAILED'}
-$live=($raw -join [char]10)|ConvertFrom-Json
-if($live.aggregate_sha256 -ne $before.aggregate_sha256){throw 'DB_CHANGED_SINCE_CLASSIFIED_BASELINE_HOLD'}
+$check=($raw -join [char]10)|ConvertFrom-Json
+NewJson (Join-Path $Packet 'database-preparation-check.json') $check
+if($check.comparison.compatible -cne $true){throw 'DB_COMPARISON_SINCE_CLASSIFIED_BASELINE_HOLD'}
 $observed=Get-Content -LiteralPath (Join-Path $Packet 'runtime-before.json') -Raw|ConvertFrom-Json
 $binding=@($observed.tasks|Where-Object name -eq 'LocalBrain Control Gateway')
 if($binding.Count -ne 1 -or @($binding[0].instances).Count -ne 1){throw 'OBSERVED_TASK_UNKNOWN'}
@@ -110,13 +114,14 @@ NewJson (Join-Path $Packet 'release-manifest.json') @{schema='localbrain.code-re
 $prodArgs=@('--no-optional-locks','-c',('safe.directory='+$DataRoot.Replace('\','/')),'-C',$DataRoot)
 $productionHead=@(& git @prodArgs rev-parse HEAD);if($LASTEXITCODE){throw 'PRODUCTION_HEAD_FAILED'}
 $knownStatus=@(& git @prodArgs status --porcelain --untracked-files=all);if($LASTEXITCODE){throw 'PRODUCTION_STATUS_FAILED'}
-$intent=@{schema='localbrain.gateway-release-intent.v1';packet=$Packet;data_root=$DataRoot;program_root='C:\ProgramData\LocalBrainServer';
+$intent=@{schema='localbrain.gateway-release-intent.v1';packet=$Packet;data_root=$DataRoot;program_root='C:\ProgramData\LocalBrainServer';database_policy='index-search-counters-v1';
  source_commit=$ExpectedCommit;manifest_sha256=FileHash (Join-Path $Packet 'release-manifest.json');script_sha256=FileHash (Join-Path $payload 'deployment\Apply-GatewayRelease.ps1');
  python=$python;python_sha256=FileHash $python;dependency_files=$dependencies;automatic_restore=$false;admin_image_inspection_required=$true;
  production_head=$productionHead[0];production_index_sha256=FileHash (Join-Path $DataRoot '.git\index');known_git_status=$knownStatus;
- protected_files=$protected;database_files=$databaseFiles;database_before_sha256=FileHash (Join-Path $Packet 'database-before.json');base_listeners=$base;
+ protected_files=$protected;database_files=$databaseFiles;database_before_sha256=$baselineHash;base_listeners=$base;
  tasks=@(@{role='gateway';task='LocalBrain Control Gateway';arguments_sha256=TextHash $actions[0].Arguments;definition_xml_sha256=TextHash $task.Xml;before=$identity});
  state='PREPARED_WAITING_PARENT_CLIENT_MAINTENANCE_GO';native_uac_invocations=0;production_task_operations=0;model_requests=0}
 Copy-Item -LiteralPath (Join-Path $payload 'deployment\Apply-GatewayRelease.ps1') -Destination (Join-Path $Packet 'Apply-GatewayRelease.ps1')
+AssertBaselineBinding $baselinePath $baselineHash
 NewJson (Join-Path $Packet 'intent.json') $intent
 @{status=$intent.state;source_commit=$ExpectedCommit;intent_sha256=FileHash (Join-Path $Packet 'intent.json');manifest_sha256=$intent.manifest_sha256;script_sha256=$intent.script_sha256;files=$manifestFiles.Count;production_writes=0}|ConvertTo-Json

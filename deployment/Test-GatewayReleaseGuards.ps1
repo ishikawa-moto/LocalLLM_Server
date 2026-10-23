@@ -15,10 +15,11 @@ $id=@{instance_guid='00000000-0000-0000-0000-000000000001';pid=101;process_birth
 $other=@{instance_guid=$id.instance_guid;pid=101;process_birth_filetime='200'}
 $running=@{state=4;instances=@($id);listener_pids=@(101)}
 $ready=@{state=3;instances=@();listener_pids=@()}
-function NewRecord {return @{BeforeTasks=@(@{role='gateway';instances=@($id)});StoppedTasks=@();OwnedStarts=@();Phase='fixture';BaseListeners=@();DatabaseBefore=@{aggregate_sha256='a'}}}
+function NewRecord {return @{BeforeTasks=@(@{role='gateway';instances=@($id)});StoppedTasks=@();OwnedStarts=@();Phase='fixture';BaseListeners=@();DatabaseBefore=@{aggregate_sha256='a'};DatabaseChecks=@();MigrationArtifact=$null}}
 # This parent-scope function always overrides disk-writing SaveReceipt in every case.
 function SaveReceipt($record){$script:saved+=@(($record|ConvertTo-Json -Depth 15 -Compress))}
 $Mode='Deploy'
+$packet=$PSScriptRoot;$root='PUBLIC';$intent=@{database_before_sha256='original-fixed-hash'}
 function AssertBaseServices {}
 Check 'same identity' {Equal (SameIdentity $id $id) $true}
 Check 'birth reuse refused' {Equal (SameIdentity $id $other) $false}
@@ -116,13 +117,35 @@ Check 'normal start checks health once' {
  Equal $script:runCount 1;Equal $script:healthCount 1;Equal $record.OwnedStarts[0].health 'passed'
 }
 
-Check 'database aggregate equality' {
- function InvokePinned($relative,$arguments){return @{aggregate_sha256='a'}}
- AssertDbState (NewRecord)
+Check 'full database observation and classification retained' {
+ function InvokePinned($relative,$arguments){return @{current_snapshot=@{aggregate_sha256='a'};comparison=@{compatible=$true;search_requests_delta=2}}}
+ $record=NewRecord;AssertDbState $record
+ Equal $record.LastDatabaseCheck.aggregate_sha256 'a';Equal $record.LastDatabaseComparison.search_requests_delta 2
+ Equal $record.DatabaseChecks.Count 1
 }
-Check 'database aggregate drift refused' {
- function InvokePinned($relative,$arguments){return @{aggregate_sha256='b'}}
- MustThrow {AssertDbState (NewRecord)} 'DATABASE_LOGICAL_STATE_DRIFT'
+Check 'failed full database evidence retained without baseline refresh' {
+ function InvokePinned($relative,$arguments){return @{current_snapshot=@{aggregate_sha256='b'};comparison=@{compatible=$false;reason_code='NONMETRICS_TABLE_DRIFT'}}}
+ $record=NewRecord
+ MustThrow {AssertDbState $record} 'DATABASE_POLICY_COMPARISON_HELD'
+ Equal $record.DatabaseBefore.aggregate_sha256 'a';Equal $record.LastDatabaseCheck.aggregate_sha256 'b'
+ Equal $record.DatabaseChecks.Count 1;Equal $record.LastDatabaseComparison.reason_code 'NONMETRICS_TABLE_DRIFT'
+}
+Check 'comparison always uses fixed original baseline even after migration' {
+ $packet=$PSScriptRoot;$root='PUBLIC';$intent=@{database_before_sha256='original-fixed-hash'}
+ function InvokePinned($relative,$arguments){
+  Equal $arguments[1] 'Check'
+  Equal $arguments[5] (Join-Path $packet 'database-before.json')
+  Equal $arguments[7] 'original-fixed-hash'
+  Equal $arguments[9] 'PUBLIC-MIGRATION';Equal $arguments[11] 'migration-hash'
+  return @{current_snapshot=@{aggregate_sha256='new'};comparison=@{compatible=$true}}
+ }
+ $record=NewRecord;$record.MigrationArtifact=@{path='PUBLIC-MIGRATION';sha256='migration-hash'}
+ $record.DatabaseAfterMigration=@{aggregate_sha256='never-use-as-new-anchor'}
+ AssertDbState $record
+}
+Check 'failure codes retain fixed codes and suppress private message content' {
+ try{throw 'DATABASE_POLICY_COMPARISON_HELD_NO_RESTORE'}catch{Equal (PublicFailureCode $_) 'DATABASE_POLICY_COMPARISON_HELD_NO_RESTORE'}
+ try{throw 'PUBLIC fixture arbitrary message / not an allowlisted code'}catch{Equal (PublicFailureCode $_) 'PRIVATE_ERROR_MESSAGE_SUPPRESSED'}
 }
 Check 'missing Parent GO refused before any mutation' {
  $Mode='Apply';$ParentGoSha256='';$intentPath='fixture';$intentHash='a';$packet=$PSScriptRoot

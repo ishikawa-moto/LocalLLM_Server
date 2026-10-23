@@ -3,9 +3,9 @@ $ErrorActionPreference='Stop'
 $path=Join-Path $PSScriptRoot 'Prepare-GatewayRelease.ps1'
 $t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$t,[ref]$e)
 if($e.Count){throw 'SYNTAX_ERROR'}
-$definition=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'GitBytes'},$false))
-if($definition.Count -ne 1){throw 'FIXED_FUNCTION_UNAVAILABLE'}
-. ([ScriptBlock]::Create($definition[0].Extent.Text))
+$definition=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('GitBytes','FileHash','AssertBaselineBinding')},$false))
+if($definition.Count -ne 3){throw 'FIXED_FUNCTION_UNAVAILABLE'}
+foreach($function in $definition){. ([ScriptBlock]::Create($function.Extent.Text))}
 $parent=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
 $fixture=Join-Path $parent ('localbrain-blob-public-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory -Path $fixture
@@ -27,8 +27,17 @@ try{
  if((HashBytes (GitBytes @('show',($commit+':fixed.txt')))) -ne (HashBytes $text)){throw 'WORKTREE_RACE_ACCEPTED'}
  & git @g add -- fixed.txt;& git @g commit --quiet -m next;if($LASTEXITCODE){throw 'SECOND_FIXTURE_COMMIT_FAILED'}
  if((HashBytes (GitBytes @('show',($commit+':fixed.txt')))) -ne (HashBytes $text)){throw 'MUTABLE_HEAD_USED'}
+ $baseline=Join-Path $fixture 'PUBLIC-baseline.json'
+ [IO.File]::WriteAllText($baseline,'PUBLIC original')
+ $expectedBaseline=FileHash $baseline
+ AssertBaselineBinding $baseline $expectedBaseline
+ [IO.File]::WriteAllText($baseline,'PUBLIC replaced during stage')
+ $refused=$false;try{AssertBaselineBinding $baseline $expectedBaseline}catch{
+  if($_.Exception.Message -ne 'BASELINE_CHANGED_DURING_PREPARE_HOLD'){throw};$refused=$true
+ }
+ if(-not $refused){throw 'MUTABLE_BASELINE_ACCEPTED'}
  $pass=$true
- @{status='PASS';checks=4;stage_source='Exact immutable commit blobs, including binary';prepare_script_sha256=(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant();production_writes=0;network_calls=0;model_requests=0}|ConvertTo-Json
+ @{status='PASS';checks=6;stage_source='Exact immutable commit blobs, including binary';prepare_script_sha256=(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant();production_writes=0;network_calls=0;model_requests=0}|ConvertTo-Json
 }finally{
  if($pass){
   $resolved=[IO.Path]::GetFullPath($fixture)
