@@ -275,17 +275,31 @@ function InstallRelease($record){
  $raw=& $intent.python -I -B $entry --pointer (Join-Path $program 'gateway-current.json') --verify-only
  if($LASTEXITCODE){throw 'RELEASE_ENTRY_VERIFY_FAILED'}
 }
+function VerifiedRegisteredTaskXml($task,[string]$expectedDefinitionHash,[string]$expectedSecurityHash){
+ # Normalize the captured registered XML only through Scheduler's in-memory schema.
+ # The complete canonical definition, including explicit SDDL, must match exactly.
+ $raw=$task.Xml
+ $service=New-Object -ComObject Schedule.Service;$service.Connect()
+ $copy=$service.NewTask(0);$copy.XmlText=$raw
+ if((StringHash $copy.XmlText) -cne $expectedDefinitionHash -or
+  (StringHash $task.GetSecurityDescriptor(7)) -cne $expectedSecurityHash){throw 'REGISTERED_TASK_DEFINITION_OR_SECURITY_DRIFT'}
+ return $raw
+}
 function UpdateTask($record){
  AssertMaintenance;AssertAssets;AssertProtected;AssertKnownFiles;AssertBase $record;AssertReadyForStart $record 'gateway';AssertDbState $record
  $task=GetTask 'gateway';$d=$task.Definition;$security=$task.GetSecurityDescriptor(7)
  $arguments='-I -B "'+(Join-Path $intent.program_root 'gateway_entry.py')+'" --pointer "'+(Join-Path $intent.program_root 'gateway-current.json')+'"'
  $d.Actions.Item(1).Arguments=$arguments
+ # RegisterTaskDefinition embeds the same existing SDDL into RegistrationInfo.
+ $d.RegistrationInfo.SecurityDescriptor=$security
  $planned=StringHash $d.XmlText
  $record.TaskUpdate=@{old_definition_sha256=$script:taskXmlHash;new_definition_sha256=$planned;new_arguments_sha256=StringHash $arguments;security_sha256=StringHash $security}
  $record.Phase='task-action-update-requested';SaveReceipt $record
  $service=New-Object -ComObject Schedule.Service;$service.Connect()
  $updated=$service.GetFolder('\').RegisterTaskDefinition('LocalBrain Control Gateway',$d,4,'SYSTEM',$null,5,$security)
- $script:taskXmlHash=$planned;$script:taskArgsHash=StringHash $arguments
+ $registeredXml=VerifiedRegisteredTaskXml $updated $planned (StringHash $security)
+ $script:taskXmlHash=StringHash $registeredXml;$script:taskArgsHash=StringHash $arguments
+ $record.TaskUpdate.verified_registered_xml_sha256=$script:taskXmlHash
  $verified=GetTask 'gateway'
  if((StringHash $verified.GetSecurityDescriptor(7)) -ne (StringHash $security)){throw 'TASK_SECURITY_CHANGED_HOLD'}
  $record.TaskUpdated=$true;$record.Phase='task-action-updated';SaveReceipt $record

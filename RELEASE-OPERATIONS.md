@@ -79,3 +79,5 @@ After the new configuration and required functions have been qualified, remove o
 Public regression/stub guards validate logic, metadata, state transitions and additive migration on disposable fixtures. Native SYSTEM image access, ACL application/task action update, actual Windows switch, Client Host-authenticated capabilities and limited real model qualification remain separate execution steps. Maintain Qwen context32768/KVq4 and the existing Host-only TLS/restriction/foreground-priority contracts.
 
 For the new fixed release maintenance operation, follow RELEASE-MAINTENANCE-FENCE.md. UAC wait and all Scheduler operations remain outside the knowledge byte lock. Both existing producer protocols and a single explicit full-evidence adoption are required; no implicit baseline refresh is permitted.
+
+After a committed migration and task-registration verification hold, follow FORWARD-GATEWAY-START.md. Never rerun Apply or infer that TaskUpdated=false means registration did not occur. The separately reviewed operation starts the already updated task once and repeats no adoption or migration.
