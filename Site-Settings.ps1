@@ -1,5 +1,5 @@
 # Deployment ports remain in ignored local settings.
-function Get-LocalBrainPort([string]$Service, [string]$Root=$PSScriptRoot) {
+function Get-LocalBrainPort([string]$Service, [string]$Root=$(if($env:LOCALBRAIN_DATA_ROOT){$env:LOCALBRAIN_DATA_ROOT}else{$PSScriptRoot})) {
     $path=Join-Path $Root 'config\private-site.json'
     $settings=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     $value=$settings.PSObject.Properties[$Service+'_port'].Value

@@ -1,0 +1,16 @@
+# Slack recovery candidate
+
+The output-aware deadline implementation is integrated separately from recovery. Existing caller caps and immutable requests remain bounded by 120 seconds; this is not a latency guarantee.
+
+`POST /v1/slack/retry` uses the existing Host-only authentication and restriction checks. It accepts logical ID, exact predecessor ID/hash, a new immutable chat request, and an allowlisted priority-yield cause. Payloads must match the predecessor except for request ID. The server reserves a unique predecessor→successor link and a new run in one transaction only after the existing inference semaphore, terminal predecessor state, same Session, maximum three total attempts, and a single idle model slot are confirmed. Missing/incompatible slot metadata defers without model startup. Repeated successor requests use the existing result. Terminal deadline/unknown/foreign chains are not retried.
+
+`GET /slots` is the fixed loopback, metadata-only llama.cpp endpoint. The candidate discards the response after checking a single slot with `is_processing=false`; no prompts, metrics, or tokens are exported. See the [upstream server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#get-slots-returns-the-current-slots-processing-state). Installed-version compatibility and real cancellation quiescence require deployment qualification; public stubs are not a live-model proof.
+
+The new `retry_links` table lives only in the isolated candidate's Slack-restricted store and is removed with the corresponding retired Session runs. No production migration, restart, model request, Canonical update, secret change, or main merge was performed. Deploy Server before a Client that advertises/consumes `quiescent-attempt-v1`, with a separately approved idle/identity/hash/database guard and explicit preservation plan. Unknown state is held; automatic rollback/database restore is prohibited by the current operating decision.
+
+Public tests cover competing attempts, persistent lineage, unchanged input, finite retries, successful result replay, missing/active slot refusal, terminal deadline denial, and the shared Client canonical request fixture. Full normal regression uses public loopback settings only. Actual Server deployment identity and real Gateway/Slack behavior remain distinct verification steps.
+
+The slot probe has an absolute two-second deadline and is registered with the same priority/cancel lease before it performs I/O. HTTP/1.0 or connection-closing slot responses are treated as unknown before reading the body, because Windows cannot reliably interrupt their transferred socket wrapper. Public slow-response fixtures verify prompt foreground cancellation and deadline termination; no private socket internals are inspected.
+
+
+Cancellation uses public `socket.detach` / `socket.close` on the exact owned loopback socket, preventing a later buffered response wrapper from closing a reused descriptor. The cancelling thread does not wait on the response-reader lock; final HTTP wrapper cleanup is performed by the request owner. Tests also verify repeated cancellation cannot close a new socket. Closing/HTTP1.0 slot responses remain unqualified and return unknown without reading their body.

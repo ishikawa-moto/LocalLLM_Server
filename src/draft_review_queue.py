@@ -29,7 +29,7 @@ def launch(brain):
     if os.name != "nt":
         raise OSError("Hidden Windows dispatch requires Windows")
     subprocess.Popen([str(pathlib.Path(os.environ["SystemRoot"]) / "System32" / "wscript.exe"),
-                      "//B", "//NoLogo", str(brain.root / "Run-DraftReviewer.hidden.vbs"), "immediate"],
+                      "//B", "//NoLogo", str(pathlib.Path(__file__).resolve().parents[1] / "Run-DraftReviewer.hidden.vbs"), "immediate"],
                      cwd=brain.root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
 

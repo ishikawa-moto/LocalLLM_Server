@@ -1,8 +1,12 @@
 """Load private deployment values without embedding personal paths or LAN addresses."""
 import json
+import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get('LOCALBRAIN_DATA_ROOT') or CODE_ROOT)
+if not ROOT.is_absolute():
+    raise ValueError('Data root must be absolute')
 
 def site_value(name, default, root=None):
     path = Path(root or ROOT) / 'config' / 'private-site.json'

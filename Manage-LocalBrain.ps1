@@ -1,6 +1,7 @@
 param([ValidateSet('Status','StartChat','StopChat','RestartChat','StatusChat','HealthChat','StartLLM','StartEmbedding','StartBrain','StartProxy','StartGateway','StartLongRun','RunLibrarian','StopLLM','StopEmbedding','StopBrain','StopProxy','StopGateway','StopLongRun','IndexBrain')][string]$Action='Status')
 $ErrorActionPreference='Stop'
-$taskRoot=$PSScriptRoot
+$taskCodeRoot=$PSScriptRoot
+$taskRoot=if($env:LOCALBRAIN_DATA_ROOT){$env:LOCALBRAIN_DATA_ROOT}else{$PSScriptRoot}
 . (Join-Path $PSScriptRoot 'Site-Settings.ps1')
 $taskState=Join-Path $taskRoot 'runtime'
 $taskLogs=Join-Path $taskRoot 'logs'
@@ -69,7 +70,7 @@ switch ($Action) {
     }
     'StartBrain' {
         $runtime=Get-Content -LiteralPath (Join-Path $taskRoot 'config\python-runtime.json') -Raw | ConvertFrom-Json
-        Start-Owned 'brain' $runtime.executable @((Join-Path $taskRoot 'src\localbrain.py'),'serve')
+        Start-Owned 'brain' $runtime.executable @((Join-Path $taskCodeRoot 'src\localbrain.py'),'--root',$taskRoot,'serve')
     }
     'StartEmbedding' {
         $model='D:\LocalBrain\embedding-models\Qwen3-Embedding-0.6B-Q8_0.gguf'
@@ -79,11 +80,11 @@ switch ($Action) {
     }
     'StartProxy' {
         $runtime=Get-Content -LiteralPath (Join-Path $taskRoot 'config\python-runtime.json') -Raw | ConvertFrom-Json
-        Start-Owned 'proxy' $runtime.executable @((Join-Path $taskRoot 'src\codex_proxy.py'))
+        Start-Owned 'proxy' $runtime.executable @((Join-Path $taskCodeRoot 'src\codex_proxy.py'))
     }
     'StartGateway' {
         $runtime=Get-Content -LiteralPath (Join-Path $taskRoot 'config\python-runtime.json') -Raw | ConvertFrom-Json
-        Start-Owned 'gateway' $runtime.executable @((Join-Path $taskRoot 'src\control_gateway.py'))
+        Start-Owned 'gateway' $runtime.executable @((Join-Path $taskCodeRoot 'src\control_gateway.py'))
     }
     'StartLongRun' {
         $runtime=Get-Content -LiteralPath (Join-Path $taskRoot 'config\python-runtime.json') -Raw | ConvertFrom-Json
@@ -93,7 +94,7 @@ switch ($Action) {
         $runtime=Get-Content -LiteralPath (Join-Path $taskRoot 'config\python-runtime.json') -Raw | ConvertFrom-Json
         $settings=Get-Content -LiteralPath (Join-Path $taskRoot 'config\secondbrain.json') -Raw | ConvertFrom-Json
         $limit=if($settings.librarian_batch_limit){[int]$settings.librarian_batch_limit}else{1}
-        & $runtime.executable (Join-Path $taskRoot 'src\localbrain.py') librarian --limit $limit --retry-failed
+        & $runtime.executable (Join-Path $taskCodeRoot 'src\localbrain.py') --root $taskRoot librarian --limit $limit --retry-failed
         if($LASTEXITCODE -ne 0){ throw 'SecondBrain librarian failed.' }
     }
     'IndexBrain' {
@@ -102,7 +103,7 @@ switch ($Action) {
         $ready=$false
         foreach($attempt in 1..180){ try {if((Invoke-RestMethod -Uri ("http://${LocalBrainLoopback}:$(Get-LocalBrainPort embedding)/health") -TimeoutSec 2).status -eq 'ok'){$ready=$true;break}}catch{}; Start-Sleep -Seconds 1 }
         if(-not $ready){throw 'Embedding service did not become ready.'}
-        & $runtime.executable (Join-Path $taskRoot 'src\localbrain.py') index
+        & $runtime.executable (Join-Path $taskCodeRoot 'src\localbrain.py') --root $taskRoot index
         if($LASTEXITCODE -ne 0){ throw 'SecondBrain indexing failed.' }
     }
     {$_ -in 'StopLLM','StopEmbedding','StopBrain','StopProxy','StopGateway','StopLongRun'} {

@@ -24,17 +24,57 @@ class InterruptionMetadataTests(unittest.TestCase):
     def test_deadline_input_bytes_and_caller_boundaries(self):
         for size, expected in ((1,30),(2048,30),(2049,45),(4096,45),(4097,60),(10902,105),(16000,120)):
             with self.subTest(size=size):
-                self.assertEqual(slack.chat_deadline_seconds(size,120),expected)
-                self.assertEqual(slack.chat_deadline_seconds(size,30),30)
-                self.assertEqual(slack.chat_deadline_seconds(size,5),5)
+                self.assertEqual(slack.chat_deadline_seconds(size,120,64),expected)
+                self.assertEqual(slack.chat_deadline_seconds(size,30,64),30)
+                self.assertEqual(slack.chat_deadline_seconds(size,5,64),5)
+
+    def test_small_input_deadline_accounts_for_bounded_output_budget(self):
+        for tokens, expected in ((64,30),(256,30),(257,60),(512,60),(513,90),(768,90),(769,120),(1024,120)):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(slack.chat_deadline_seconds(1504,120,tokens),expected)
+                self.assertEqual(slack.chat_deadline_seconds(1504,30,tokens),30)
+                self.assertEqual(slack.chat_deadline_seconds(1504,5,tokens),5)
+        self.assertEqual(slack.chat_deadline_seconds(10902,120,64),105)
+        self.assertEqual(slack.chat_deadline_seconds(10902,120,1024),120)
+
+    def test_small_public_document_survives_old_cutoff_without_replay(self):
+        for elapsed, requested, expected in ((36.,120,'complete'),(119.,120,'complete'),
+                                             (120.,120,'interrupted'),(121.,120,'interrupted'),
+                                             (31.,30,'interrupted')):
+            with self.subTest(elapsed=elapsed,requested=requested):
+                now=[0.]
+                calls=[]
+                class InertTimer:
+                    daemon=False
+                    def __init__(self,*args,**kwargs):pass
+                    def start(self):pass
+                    def cancel(self):pass
+                def model(messages,tokens,timeout,lease):
+                    calls.append((tokens,timeout))
+                    now[0]=elapsed
+                    return 'PUBLIC document interpretation.'
+                service,_=self.service(model)
+                value=request()
+                value.update(context='c'*1452,prompt='q'*51,timeout_seconds=requested,max_tokens=1024)
+                with patch.object(slack.time,'monotonic',side_effect=lambda:now[0]),patch.object(slack.threading,'Timer',InertTimer):
+                    result=service.execute('chat',value)
+                    self.assertEqual(result['status'],expected)
+                    self.assertEqual(calls,[(1024,requested)])
+                    service.model=lambda *args:self.fail('same request replayed a model call')
+                    self.assertEqual(service.execute('chat',value),result)
+                if expected=='interrupted':
+                    self.assertEqual(result['reason'],'deadline_exceeded')
+                    self.assertFalse(result['retry_safe'])
+                    self.assertEqual(result['diagnostics']['deadline_seconds'],requested)
+                    self.assertNotIn('text',result)
 
     def test_long_public_chat_gets_bounded_allowance_and_unchanged_output_limit(self):
         service,calls=self.service()
         value=request();value.update(context='c'*10840,prompt='q'*61,timeout_seconds=120,max_tokens=2048)
         self.assertEqual(service.execute('chat',value)['status'],'complete')
         self.assertEqual(calls[0][0],1024)
-        self.assertGreater(calls[0][1],100)
-        self.assertLessEqual(calls[0][1],105)
+        self.assertGreater(calls[0][1],115)
+        self.assertLessEqual(calls[0][1],120)
         self.assertEqual(service.capabilities()['chat_timeout_seconds'],120)
 
     def test_review_total_deadline_stays_at_sixty_seconds(self):
@@ -112,7 +152,7 @@ class InterruptionMetadataTests(unittest.TestCase):
         service,_=self.service(lambda *a:self.fail('legacy active request must not retry'))
         value=request()
         service.store.reserve(value['request_id'],slack.digest(dict(action='chat',value=value)),value['session_id'])
-        self.assertEqual(service.execute('chat',value),dict(status='interrupted',retry_safe=False))
+        self.assertEqual(service.execute('chat',value),dict(status='unresolved',retry_safe=False))
 
     def test_safe_metadata_whitelist_rejects_unknown_fields_and_arbitrary_reasons(self):
         value=dict(reason='upstream_failure',diagnostics=dict(input_bytes=10,phase='generation',
