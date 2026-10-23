@@ -7,6 +7,9 @@ if($errors.Count){throw 'SYNTAX_ERRORS'}
 # Import only function definitions, never the activation script body.
 $functions=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false))
 foreach($definition in $functions){. ([ScriptBlock]::Create($definition.Extent.Text))}
+$fenceAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'release_fence.ps1'),[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'FENCE_SYNTAX_ERRORS'}
+foreach($f in @($fenceAst.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst]},$false))){. ([scriptblock]::Create($f.Extent.Text))}
 $script:passed=0;$script:results=@()
 function Check([string]$name,[scriptblock]$body){& $body;$script:passed++;$script:results+=@($name)}
 function MustThrow([scriptblock]$body,[string]$expected){$caught=$false;try{& $body}catch{if($_.Exception.Message -notlike ('*'+$expected+'*')){throw};$caught=$true};if(-not $caught){throw "Expected rejection: $expected"}}
@@ -130,7 +133,7 @@ Check 'failed full database evidence retained without baseline refresh' {
  Equal $record.DatabaseBefore.aggregate_sha256 'a';Equal $record.LastDatabaseCheck.aggregate_sha256 'b'
  Equal $record.DatabaseChecks.Count 1;Equal $record.LastDatabaseComparison.reason_code 'NONMETRICS_TABLE_DRIFT'
 }
-Check 'comparison always uses fixed original baseline even after migration' {
+Check 'comparison always uses fixed effective baseline after migration' {
  $packet=$PSScriptRoot;$root='PUBLIC';$intent=@{database_before_sha256='original-fixed-hash'}
  function InvokePinned($relative,$arguments){
   Equal $arguments[1] 'Check'
@@ -139,7 +142,7 @@ Check 'comparison always uses fixed original baseline even after migration' {
   Equal $arguments[9] 'PUBLIC-MIGRATION';Equal $arguments[11] 'migration-hash'
   return @{current_snapshot=@{aggregate_sha256='new'};comparison=@{compatible=$true}}
  }
- $record=NewRecord;$record.MigrationArtifact=@{path='PUBLIC-MIGRATION';sha256='migration-hash'}
+ $record=NewRecord;$record.EffectiveBaselineArtifact=@{path=(Join-Path $packet 'database-before.json');sha256='original-fixed-hash'};$record.MigrationArtifact=@{path='PUBLIC-MIGRATION';sha256='migration-hash'}
  $record.DatabaseAfterMigration=@{aggregate_sha256='never-use-as-new-anchor'}
  AssertDbState $record
 }
@@ -156,8 +159,8 @@ Check 'Parent busy gate refused' {
  $Mode='Apply';$ParentGoSha256='a'*64;$intentHash='a'*64;$intentPath='fixture';$packet=$PSScriptRoot
  $intent=@{script_sha256='b'}
  function FileHash($path){return 'a'*64}
- function Get-Content {param($LiteralPath,[switch]$Raw)
-  return (@{phase='ClientMaintenanceConfirmedApplyGO';intent_sha256=('a'*64);script_sha256='b';client_active_requests=1;client_queued_requests=0;no_new_requests_until_finished=$true;parent_message_reference='PUBLIC';created_utc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json)
+ function ReadFixedJson {param($path,$expected,$failureCode)
+  return (@{phase='ClientMaintenanceConfirmedApplyGO';intent_sha256=('a'*64);script_sha256='b';client_active_requests=1;client_queued_requests=0;no_new_requests_until_finished=$true;parent_message_reference='PUBLIC';created_utc=[DateTime]::UtcNow.ToString('o')})
  }
  MustThrow {AssertMaintenance} 'PARENT_MAINTENANCE_GATE_INVALID'
 }
@@ -165,8 +168,8 @@ Check 'Parent expired gate refused' {
  $Mode='Apply';$ParentGoSha256='a'*64;$intentHash='a'*64;$intentPath='fixture';$packet=$PSScriptRoot
  $intent=@{script_sha256='b'}
  function FileHash($path){return 'a'*64}
- function Get-Content {param($LiteralPath,[switch]$Raw)
-  return (@{phase='ClientMaintenanceConfirmedApplyGO';intent_sha256=('a'*64);script_sha256='b';client_active_requests=0;client_queued_requests=0;no_new_requests_until_finished=$true;parent_message_reference='PUBLIC';created_utc=[DateTime]::UtcNow.AddMinutes(-16).ToString('o')}|ConvertTo-Json)
+ function ReadFixedJson {param($path,$expected,$failureCode)
+  return (@{phase='ClientMaintenanceConfirmedApplyGO';intent_sha256=('a'*64);script_sha256='b';client_active_requests=0;client_queued_requests=0;no_new_requests_until_finished=$true;parent_message_reference='PUBLIC';created_utc=[DateTime]::UtcNow.AddMinutes(-16).ToString('o')})
  }
  MustThrow {AssertMaintenance} 'PARENT_MAINTENANCE_GATE_EXPIRED'
 }
@@ -185,4 +188,120 @@ Check 'unhealthy base prevents Run' {
  MustThrow {StartExact (NewRecord) 'gateway'} 'BASE_SERVICES_UNHEALTHY_NO_AUTOSTART'
 }
 
+Check 'before fence comparison previews without adoption' {
+ function InvokePinned($relative,$arguments){Equal $arguments[1] 'CheckBusiness';return @{current_snapshot=@{};comparison=@{compatible=$true}}}
+ $record=NewRecord;AssertDbState $record;Equal $record.EffectiveBaselineArtifact $null
+}
+Check 'migration cannot occur without fixed fenced anchor' {
+ $record=NewRecord;$record.MigrationArtifact=@{path='PUBLIC'}
+ MustThrow {AssertDbState $record} 'MIGRATION_WITHOUT_FENCED_BASELINE'
+}
+Check 'second adoption is refused before helper call' {
+ function AssertKnowledgeFence($record){}
+ function InvokePinned {throw 'UNEXPECTED_SECOND_ADOPTION'}
+ $record=NewRecord;$record.FencedAdoptionAttempted=$true
+ MustThrow {AdoptFencedBaseline $record} 'FENCED_ADOPTION_ALREADY_ATTEMPTED'
+}
+Check 'migration exception releases knowledge fence' {
+ function AcquireKnowledgeFence($record){$record.KnowledgeFence=@{released=$false}}
+ function AssertKnowledgeFence($record){}
+ function AdoptFencedBaseline($record){throw 'PUBLIC_BUSINESS_DRIFT'}
+ function ReleaseKnowledgeFence($record){$record.KnowledgeFence.released=$true}
+ $record=NewRecord
+ MustThrow {InvokeFencedMigration $record} 'PUBLIC_BUSINESS_DRIFT'
+ Equal $record.KnowledgeFence.released $true
+}
+Check 'cooperative budget refusal releases knowledge fence' {
+ function AcquireKnowledgeFence($record){$record.KnowledgeFence=@{released=$false}}
+ function AssertKnowledgeFence($record){throw 'KNOWLEDGE_FENCE_COOPERATIVE_BUDGET_EXPIRED'}
+ function AdoptFencedBaseline {throw 'UNEXPECTED_ADOPTION'}
+ function ReleaseKnowledgeFence($record){$record.KnowledgeFence.released=$true}
+ $record=NewRecord
+ MustThrow {InvokeFencedMigration $record} 'KNOWLEDGE_FENCE_COOPERATIVE_BUDGET_EXPIRED'
+ Equal $record.KnowledgeFence.released $true
+}
+Check 'existing Librarian refuses before Gateway stop' {
+ function AcquireLibrarianBarrier($record){throw 'PUBLIC_LIBRARIAN_BUSY'}
+ function StopExact {throw 'UNEXPECTED_STOP'}
+ MustThrow {InvokeReleaseTransition (NewRecord)} 'PUBLIC_LIBRARIAN_BUSY'
+}
+Check 'stop failure releases producer barrier without acquiring byte lock' {
+ function AcquireLibrarianBarrier($record){$record.LibrarianBarrier=@{released=$false}}
+ function AssertLibrarianBarrier($record){}
+ function StopExact {throw 'PUBLIC_STOP_HELD'}
+ function InvokeFencedMigration {throw 'UNEXPECTED_BYTE_LOCK'}
+ function ReleaseLibrarianBarrier($record){$record.LibrarianBarrier.released=$true}
+ $record=NewRecord;MustThrow {InvokeReleaseTransition $record} 'PUBLIC_STOP_HELD'
+ Equal $record.LibrarianBarrier.released $true
+}
+Check 'Scheduler and start occur only after knowledge release; producer barrier persists' {
+ function AcquireLibrarianBarrier($record){$record.LibrarianBarrier=@{released=$false};$script:order=@('barrier')}
+ function AssertLibrarianBarrier($record){Equal $record.LibrarianBarrier.released $false}
+ function StopExact($record,$role){Equal $record.KnowledgeFence $null;$script:order+=@('stop')}
+ function AssertReadyForStart($record,$role){}
+ function InvokeFencedMigration($record){$record.KnowledgeFence=@{released=$true};$script:order+=@('migration-unlocked')}
+ function UpdateTask($record){Equal $record.KnowledgeFence.released $true;Equal $record.LibrarianBarrier.released $false;$script:order+=@('update')}
+ function StartExact($record,$role){Equal $record.KnowledgeFence.released $true;Equal $record.LibrarianBarrier.released $false;$script:order+=@('start')}
+ function AssertMaintenance{};function AssertAssets{};function AssertProtected{};function AssertKnownFiles{};function AssertBase($record){};function AssertIdle($record){}
+ function AssertOwned($record,$role){return @{}}
+ function AssertAdminImage($snapshot){return @{}}
+ function ReleaseLibrarianBarrier($record){$record.LibrarianBarrier.released=$true;$script:order+=@('release')}
+ $record=NewRecord;InvokeReleaseTransition $record
+ Equal ($script:order -join ',') 'barrier,stop,migration-unlocked,update,start,release'
+}
+Check 'failure after release or start never retries; producer barrier finally releases' {
+ function AcquireLibrarianBarrier($record){$record.LibrarianBarrier=@{released=$false}}
+ function AssertLibrarianBarrier($record){}
+ function StopExact($record,$role){}
+ function AssertReadyForStart($record,$role){}
+ function InvokeFencedMigration($record){$record.KnowledgeFence=@{released=$true}}
+ function UpdateTask($record){throw 'PUBLIC_UPDATE_FAILED'}
+ function StartExact {throw 'UNEXPECTED_RUN'}
+ function ReleaseLibrarianBarrier($record){$record.LibrarianBarrier.released=$true}
+ $record=NewRecord;MustThrow {InvokeReleaseTransition $record} 'PUBLIC_UPDATE_FAILED'
+ Equal $record.LibrarianBarrier.released $true
+}
+Check 'effective anchor contains exactly the adopted complete snapshot' {
+ function AssertKnowledgeFence($record){}
+ function InvokePinned($relative,$arguments){
+  Equal $arguments[1] 'AdoptFencedMetrics'
+  Equal $arguments[-1] 'public-token'
+  return @{status='FENCED_OPERATIONAL_METRICS_ADOPTED';fence_token='public-token';reference='public-ref';comparison=@{compatible=$true};
+   source_baseline=@{aggregate_sha256='old-complete'};observed_snapshot=@{aggregate_sha256='adopted-complete'};adopted_baseline=@{aggregate_sha256='adopted-complete'}}
+ }
+ function SaveNewArtifact($name,$value){$script:artifactValues[$name]=$value;return @{path=$name;sha256='public-fixed-hash'}}
+ $intent=@{fenced_adoption_reference='public-ref'};$record=NewRecord;$record.KnowledgeFence=@{token='public-token'}
+ $script:artifactValues=@{};AdoptFencedBaseline $record
+ Equal $script:artifactValues['database-fenced-baseline.json'].aggregate_sha256 'adopted-complete'
+ Equal $script:artifactValues['fenced-adoption.json'].source_baseline.aggregate_sha256 'old-complete'
+ Equal $record.EffectiveBaselineArtifact.sha256 'public-fixed-hash';Equal $record.FencedAdoptionAttempted $true
+}
+Check 'saved anchor hash comes from validated buffer, refusing path substitution' {
+ $packet=Join-Path ([IO.Path]::GetTempPath()) ('localbrain-artifact-public-'+[guid]::NewGuid().ToString('N'))
+ $null=New-Item -ItemType Directory -Path $packet
+ function FileHash($path){return 'public-substitution'}
+ try{MustThrow {SaveNewArtifact 'public.json' @{public='validated'}} 'SAVED_ARTIFACT_BYTES_DRIFT'}
+ finally{Remove-Item -LiteralPath (Join-Path $packet 'public.json');Remove-Item -LiteralPath $packet}
+}
+Check 'same-buffer fixed JSON refuses changed manifest before helper execution' {
+ $packet=Join-Path ([IO.Path]::GetTempPath()) ('localbrain-manifest-public-'+[guid]::NewGuid().ToString('N'))
+ $null=New-Item -ItemType Directory -Path (Join-Path $packet 'payload')
+ $manifest=Join-Path $packet 'release-manifest.json';$helper=Join-Path $packet 'payload/public.py'
+ [IO.File]::WriteAllText($manifest,'{"source_commit":"PUBLIC","files":[]}')
+ [IO.File]::WriteAllText($helper,'raise AssertionError("must never execute")')
+ $intent=@{manifest_sha256=('0'*64);source_commit='PUBLIC';python='PUBLIC_MUST_NEVER_START'}
+ function AssertAssets {}
+ try{MustThrow {InvokePinned 'public.py' @('--mode','Describe')} 'MANIFEST_BYTES_NOT_VERIFIED'}
+ finally{Remove-Item -LiteralPath $helper;Remove-Item -LiteralPath (Split-Path $helper -Parent);Remove-Item -LiteralPath $manifest;Remove-Item -LiteralPath $packet}
+}
+Check 'same-buffer fixed JSON returns exactly hashed content' {
+ $p=Join-Path ([IO.Path]::GetTempPath()) ('localbrain-json-public-'+[guid]::NewGuid().ToString('N')+'.json')
+ $bytes=[Text.Encoding]::UTF8.GetBytes('{"public":"validated"}');[IO.File]::WriteAllBytes($p,$bytes)
+ $expected=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+ try{
+  Equal (ReadFixedJson $p $expected 'PUBLIC_DRIFT').public 'validated'
+  [IO.File]::WriteAllText($p,'{"public":"changed"}')
+  MustThrow {ReadFixedJson $p $expected 'PUBLIC_DRIFT'} 'PUBLIC_DRIFT'
+ }finally{Remove-Item -LiteralPath $p}
+}
 [ordered]@{status='PASS';checks=$script:passed;cases=$script:results;script_sha256=FileHash $scriptPath;production_operations=0;database_reads=0;network_calls=0;model_requests=0}|ConvertTo-Json -Depth 5

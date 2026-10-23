@@ -53,12 +53,14 @@ function SameIdentity($a,$b){
 }
 
 $null=SafePath $intentPath $packet
-$intentHash=FileHash $intentPath
+$intentBytes=[IO.File]::ReadAllBytes($intentPath)
+$intentHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($intentBytes)).ToLowerInvariant()
 if($ApprovedIntentSha256 -notmatch '^[a-f0-9]{64}$' -or $intentHash -ne $ApprovedIntentSha256){throw 'INTENT_MISMATCH'}
-$intent=Get-Content -LiteralPath $intentPath -Raw|ConvertFrom-Json
+$intent=[Text.Encoding]::UTF8.GetString($intentBytes)|ConvertFrom-Json
 $root=$intent.data_root
 if($intent.schema -ne 'localbrain.gateway-release-intent.v1' -or $intent.packet -ne $packet -or (FileHash $PSCommandPath) -ne $intent.script_sha256 -or
- $intent.program_root -ne 'C:\ProgramData\LocalBrainServer' -or $intent.automatic_restore -cne $false -or $intent.database_policy -ne 'index-search-counters-v1' -or
+ $intent.program_root -ne 'C:\ProgramData\LocalBrainServer' -or $intent.automatic_restore -cne $false -or $intent.database_policy -ne 'index-search-counters-v1' -or $intent.maintenance_policy -ne 'fenced-operational-metrics-v1' -or
+ $intent.fenced_adoption_reference -cne ('fenced-operational-metrics-v1:'+$intent.source_commit) -or
  @($intent.tasks).Count -ne 1 -or $intent.tasks[0].task -ne 'LocalBrain Control Gateway'){throw 'FIXED_SCOPE_DRIFT'}
 $script:taskXmlHash=$intent.tasks[0].definition_xml_sha256
 $script:taskArgsHash=$intent.tasks[0].arguments_sha256
@@ -67,11 +69,22 @@ function AssertMaintenance {
  if($Mode -ne 'Apply'){return}
  $path=SafePath (Join-Path $packet 'apply-go.json') $packet
  if($ParentGoSha256 -notmatch '^[a-f0-9]{64}$' -or (FileHash $path) -ne $ParentGoSha256){throw 'PARENT_APPLY_GO_REQUIRED'}
- $g=Get-Content -LiteralPath $path -Raw|ConvertFrom-Json
+ $g=ReadFixedJson $path $ParentGoSha256 'PARENT_APPLY_GO_BYTES_DRIFT'
  if($g.phase -ne 'ClientMaintenanceConfirmedApplyGO' -or $g.intent_sha256 -ne $intentHash -or $g.script_sha256 -ne $intent.script_sha256 -or
  ($g.client_active_requests -isnot [int] -and $g.client_active_requests -isnot [long]) -or ($g.client_queued_requests -isnot [int] -and $g.client_queued_requests -isnot [long]) -or $g.client_active_requests -ne 0 -or $g.client_queued_requests -ne 0 -or $g.no_new_requests_until_finished -cne $true -or $g.parent_message_reference -notmatch '\S'){throw 'PARENT_MAINTENANCE_GATE_INVALID'}
  $date=if($g.created_utc -is [DateTime]){$g.created_utc.ToUniversalTime()}else{[DateTimeOffset]::Parse([string]$g.created_utc).UtcDateTime}
  if($date -gt [DateTime]::UtcNow -or ([DateTime]::UtcNow-$date).TotalMinutes -gt 15){throw 'PARENT_MAINTENANCE_GATE_EXPIRED'}
+}
+function ReadFixedJson([string]$path,[string]$expected,[string]$failureCode){
+ $bytes=[IO.File]::ReadAllBytes($path)
+ if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -ne $expected){throw $failureCode}
+ return ([Text.Encoding]::UTF8.GetString($bytes)|ConvertFrom-Json -AsHashtable)
+}
+function GetFixedManifest {
+ $path=SafePath (Join-Path $packet 'release-manifest.json') $packet
+ $value=ReadFixedJson $path $intent.manifest_sha256 'MANIFEST_BYTES_NOT_VERIFIED'
+ if($value.source_commit -cne $intent.source_commit){throw 'RELEASE_VERSION_DRIFT'}
+ return $value
 }
 function AssertAssets {
  if((FileHash $intent.python) -ne $intent.python_sha256 -or (FileHash (Join-Path $packet 'release-manifest.json')) -ne $intent.manifest_sha256){throw 'RUNTIME_OR_MANIFEST_DRIFT'}
@@ -79,7 +92,7 @@ function AssertAssets {
   $p=SafePath $b.path (Split-Path $b.path -Parent)
   if((FileHash $p) -ne $b.sha256){throw 'CONFIGURED_DEPENDENCY_DRIFT'}
  }
- $m=Get-Content -LiteralPath (Join-Path $packet 'release-manifest.json') -Raw|ConvertFrom-Json
+ $m=GetFixedManifest
  if($m.source_commit -ne $intent.source_commit){throw 'RELEASE_VERSION_DRIFT'}
  foreach($b in $m.files){if((FileHash (SafePath (Join-Path $packet ('payload\'+$b.path)) $packet)) -ne $b.sha256){throw 'STAGED_PAYLOAD_DRIFT'}}
  if((FileHash (Join-Path $packet 'database-before.json')) -ne $intent.database_before_sha256){throw 'DB_BASELINE_FILE_DRIFT'}
@@ -113,7 +126,7 @@ function InvokePinned([string]$relative,[string[]]$arguments){
  AssertAssets
  $p=SafePath (Join-Path $packet ('payload\'+$relative)) $packet
  $bytes=[IO.File]::ReadAllBytes($p)
- $m=Get-Content -LiteralPath (Join-Path $packet 'release-manifest.json') -Raw|ConvertFrom-Json
+ $m=GetFixedManifest
  $b=@($m.files|Where-Object path -eq $relative)
  if($b.Count -ne 1 -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() -ne $b[0].sha256){throw 'HELPER_BYTES_NOT_VERIFIED'}
  $raw=& $intent.python -I -B -c ([Text.Encoding]::UTF8.GetString($bytes)) @arguments
@@ -121,7 +134,14 @@ function InvokePinned([string]$relative,[string[]]$arguments){
  return (($raw -join [char]10)|ConvertFrom-Json -AsHashtable)
 }
 function AssertDbState($record){
- $arguments=@('--mode','Check','--root',$root,'--before',(Join-Path $packet 'database-before.json'),'--before-sha256',$intent.database_before_sha256)
+ if($record.EffectiveBaselineArtifact){
+  $anchor=$record.EffectiveBaselineArtifact
+  $arguments=@('--mode','Check','--root',$root,'--before',$anchor.path,'--before-sha256',$anchor.sha256)
+ }else{
+  if($record.MigrationArtifact){throw 'MIGRATION_WITHOUT_FENCED_BASELINE'}
+  # Preview retains old/new full evidence and never changes the original baseline.
+  $arguments=@('--mode','CheckBusiness','--root',$root,'--before',(Join-Path $packet 'database-before.json'),'--before-sha256',$intent.database_before_sha256)
+ }
  if($record.MigrationArtifact){$arguments+=@('--migration',$record.MigrationArtifact.path,'--migration-sha256',$record.MigrationArtifact.sha256)}
  $observed=InvokePinned 'deployment/release_db.py' $arguments
  $record.LastDatabaseCheck=$observed.current_snapshot
@@ -129,13 +149,69 @@ function AssertDbState($record){
  $record.DatabaseChecks=@($record.DatabaseChecks)+@($observed)
  if($observed.comparison.compatible -cne $true){throw 'DATABASE_POLICY_COMPARISON_HELD_NO_RESTORE'}
 }
-function SaveMigrationArtifact($migration){
- $p=SafePath (Join-Path $packet 'migration-result.json') $packet
- $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($migration|ConvertTo-Json -Depth 20)+[char]10)
+function SaveNewArtifact([string]$name,$value){
+ $p=SafePath (Join-Path $packet $name) $packet
+ $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($value|ConvertTo-Json -Depth 24)+[char]10)
  $f=[IO.FileStream]::new($p,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
  try{$f.Write($bytes);$f.Flush($true)}finally{$f.Dispose()}
- return @{path=$p;sha256=FileHash $p}
+ $expected=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+ if((FileHash $p) -ne $expected){throw 'SAVED_ARTIFACT_BYTES_DRIFT'}
+ return @{path=$p;sha256=$expected}
 }
+function AdoptFencedBaseline($record){
+ AssertKnowledgeFence $record
+ if($record.FencedAdoptionAttempted -or $record.EffectiveBaselineArtifact){throw 'FENCED_ADOPTION_ALREADY_ATTEMPTED'}
+ $record.FencedAdoptionAttempted=$true;$record.Phase='fenced-baseline-adoption-requested';SaveReceipt $record
+ $adoption=InvokePinned 'deployment/release_db.py' @('--mode','AdoptFencedMetrics','--root',$root,
+  '--before',(Join-Path $packet 'database-before.json'),'--before-sha256',$intent.database_before_sha256,
+  '--adoption-reference',$intent.fenced_adoption_reference,'--fence-token',$record.KnowledgeFence.token)
+ AssertKnowledgeFence $record
+ if($adoption.status -ne 'FENCED_OPERATIONAL_METRICS_ADOPTED' -or $adoption.fence_token -cne $record.KnowledgeFence.token -or
+  $adoption.reference -cne $intent.fenced_adoption_reference -or $adoption.comparison.compatible -cne $true){throw 'FENCED_ADOPTION_NOT_VERIFIED'}
+ $record.FencedAdoptionArtifact=SaveNewArtifact 'fenced-adoption.json' $adoption
+ $record.EffectiveBaselineArtifact=SaveNewArtifact 'database-fenced-baseline.json' $adoption.adopted_baseline
+ $record.Phase='single-fenced-baseline-adopted';SaveReceipt $record
+ AssertKnowledgeFence $record
+}
+function InvokeFencedMigration($record){
+ AcquireKnowledgeFence $record
+ try{
+  AssertKnowledgeFence $record
+  AdoptFencedBaseline $record
+  AssertKnowledgeFence $record
+  $record.Phase='additive-migration-requested';SaveReceipt $record
+  $anchor=$record.EffectiveBaselineArtifact
+  $migration=InvokePinned 'deployment/release_db.py' @('--mode','Migrate','--root',$root,'--before',$anchor.path,'--before-sha256',$anchor.sha256)
+  if($migration.status -ne 'ADDITIVE_MIGRATION_VERIFIED' -or $migration.existing_rows_unchanged -cne $true){throw 'MIGRATION_NOT_VERIFIED'}
+  $record.Migration=$migration;$record.MigrationArtifact=SaveMigrationArtifact $migration
+  AssertKnowledgeFence $record
+  $record.Phase='post-migration-classification';AssertDbState $record
+  $record.DatabaseAfterMigration=$record.LastDatabaseCheck
+  AssertKnowledgeFence $record
+  $record.Phase='migration-committed-existing-rows-preserved';SaveReceipt $record
+ }finally{ReleaseKnowledgeFence $record}
+}
+function InvokeReleaseTransition($record){
+ AcquireLibrarianBarrier $record
+ try{
+  # Existing producer barrier covers already dispatched Librarian children as well.
+  # Stop/Ready and all Scheduler COM operations stay outside the short byte-lock section.
+  AssertLibrarianBarrier $record
+  StopExact $record 'gateway'
+  AssertReadyForStart $record 'gateway'
+  InvokeFencedMigration $record
+  AssertLibrarianBarrier $record
+  if(-not $record.KnowledgeFence.released){throw 'KNOWLEDGE_FENCE_NOT_RELEASED_BEFORE_SCHEDULER'}
+  SaveReceipt $record
+  UpdateTask $record
+  StartExact $record 'gateway'
+  AssertMaintenance;AssertAssets;AssertProtected;AssertKnownFiles;AssertBase $record;AssertIdle $record
+  $record.FinalGateway=AssertOwned $record 'gateway';$record.AdminAfterImage=AssertAdminImage $record.FinalGateway
+  AssertLibrarianBarrier $record
+ }finally{ReleaseLibrarianBarrier $record}
+ if(-not $record.LibrarianBarrier.released){throw 'LIBRARIAN_BARRIER_RELEASE_UNCONFIRMED'}
+}
+function SaveMigrationArtifact($migration){return (SaveNewArtifact 'migration-result.json' $migration)}
 function PublicFailureCode($failure){
  $message=$failure.Exception.Message
  if($message -cmatch '^[A-Z][A-Z_]{2,100}$'){return $message}
@@ -170,7 +246,7 @@ function InstallRelease($record){
  $null=New-Item -ItemType Directory -Path $program
  $release=Join-Path $program ('releases\'+$intent.source_commit)
  $null=New-Item -ItemType Directory -Path $release -Force
- $m=Get-Content -LiteralPath (Join-Path $packet 'release-manifest.json') -Raw|ConvertFrom-Json
+ $m=GetFixedManifest
  foreach($b in $m.files){
   $dest=SafePath (Join-Path $release $b.path) $release
   $null=New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force
@@ -307,6 +383,13 @@ if($Mode -eq 'Inspect'){@{status='INSPECTED_READONLY';gateway=$initial;admin_ima
 AssertMaintenance
 $who=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $who.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'NATIVE_WINDOWS_UAC_REQUIRED'}
+# Load exactly the manifested module bytes. Importing definitions acquires no locks.
+$fencePath=SafePath (Join-Path $packet 'payload\deployment\release_fence.ps1') $packet
+$fenceBytes=[IO.File]::ReadAllBytes($fencePath)
+$fenceManifest=GetFixedManifest
+$fenceBinding=@($fenceManifest.files|Where-Object path -eq 'deployment/release_fence.ps1')
+if($fenceBinding.Count -ne 1 -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($fenceBytes)).ToLowerInvariant() -ne $fenceBinding[0].sha256){throw 'FENCE_MODULE_BYTES_NOT_VERIFIED'}
+. ([scriptblock]::Create([Text.Encoding]::UTF8.GetString($fenceBytes)))
 $mutex=[Threading.Mutex]::new($false,'Global\LocalBrain-GatewayRelease-20261023')
 if(-not $mutex.WaitOne(0)){$mutex.Dispose();throw 'ANOTHER_RELEASE_WORKER_ACTIVE'}
 $record=$null
@@ -315,24 +398,12 @@ try{
  $baseline=Get-Content -LiteralPath (Join-Path $packet 'database-before.json') -Raw|ConvertFrom-Json -AsHashtable
  $record=@{Schema='localbrain.gateway-release-execution.v1';Phase='preflight';IntentSha256=$intentHash;ScriptSha256=$intent.script_sha256;
  BeforeTasks=@($initial);BaseListeners=@($intent.base_listeners);DatabaseBefore=$baseline;DatabaseAfterMigration=$null;
- OwnedStarts=@();StoppedTasks=@();TaskUpdated=$false;DatabaseChecks=@();MigrationArtifact=$null;ExplicitModelRequests=0;AutomaticRestore=$false;ParentGoSha256=$ParentGoSha256}
+ OwnedStarts=@();StoppedTasks=@();TaskUpdated=$false;DatabaseChecks=@();MigrationArtifact=$null;EffectiveBaselineArtifact=$null;FencedAdoptionAttempted=$false;LibrarianBarrier=$null;KnowledgeFence=$null;ExplicitModelRequests=0;AutomaticRestore=$false;ParentGoSha256=$ParentGoSha256}
  $record.Phase='preflight-admin-image';$record.AdminBeforeImage=AssertAdminImage $initial
  $record.Phase='preflight-protected-listeners';AssertBase $record
  $record.Phase='preflight-idle-and-database';AssertIdle $record;SaveReceipt $record
  InstallRelease $record
- StopExact $record 'gateway'
- AssertReadyForStart $record 'gateway';AssertDbState $record
- $record.Phase='additive-migration-requested';SaveReceipt $record
- $migration=InvokePinned 'deployment/release_db.py' @('--mode','Migrate','--root',$root,'--before',(Join-Path $packet 'database-before.json'),'--before-sha256',$intent.database_before_sha256)
- if($migration.status -ne 'ADDITIVE_MIGRATION_VERIFIED' -or $migration.existing_rows_unchanged -cne $true){throw 'MIGRATION_NOT_VERIFIED'}
- $record.Migration=$migration;$record.MigrationArtifact=SaveMigrationArtifact $migration
- $record.Phase='post-migration-classification';AssertDbState $record
- $record.DatabaseAfterMigration=$record.LastDatabaseCheck
- $record.Phase='migration-committed-existing-rows-preserved';SaveReceipt $record
- UpdateTask $record
- StartExact $record 'gateway'
- AssertMaintenance;AssertAssets;AssertProtected;AssertKnownFiles;AssertBase $record;AssertIdle $record
- $record.FinalGateway=AssertOwned $record 'gateway';$record.AdminAfterImage=AssertAdminImage $record.FinalGateway
+ InvokeReleaseTransition $record
  $record.Phase='SERVER_DEPLOYED_AWAITING_CLIENT_HOST_QUALIFICATION';SaveReceipt $record
  @{status=$record.Phase;receipt_sha256=FileHash $receiptPath;source_commit=$intent.source_commit;automatic_restore=$false;model_requests=0}|ConvertTo-Json
 }catch{
