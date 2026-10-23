@@ -169,8 +169,8 @@ def classify(before,current,migration=None):
         result['reason_code']=code if re.fullmatch('[A-Z_]+',code) else 'INVALID_COMPARISON_RECORD'
     return result
 
-def upgrade_legacy(legacy,current):
-    """Explicit offline proof: never refresh an opaque old baseline without a typed hash match."""
+def validate_legacy_business(legacy,current):
+    """Require exact old business records and a current strict known metrics profile."""
     validate_snapshot(current)
     require(legacy.get('schema')=='localbrain.all-table-snapshot.v1' and
             set(legacy.get('databases',{}))==set(DATABASES) and
@@ -183,17 +183,33 @@ def upgrade_legacy(legacy,current):
         require(old['schema_sha256']==new['schema_sha256'] and old['user_version']==new['user_version']
                 and set(old['tables'])==set(new['tables']),'LEGACY_INDEX_SCHEMA')
         require(all(table==new['tables'][name] for name,table in old['tables'].items() if name!='metrics'),'LEGACY_NONMETRICS_TABLE_DRIFT')
-        counters=new['metrics_profile']['counters']
-        require(old['tables']['metrics']['rows']==len(counters),'LEGACY_METRICS_ROW_COUNT')
-        matches=[]
-        if SEARCH_KEYS<=counters.keys():
-            for dq in range(SEARCH_DELTA_LIMIT+1):
-                for dh in range(dq+1):
-                    prior=dict(counters,search_requests=counters['search_requests']-dq,search_hits=counters['search_hits']-dh)
-                    if 0<=prior['search_hits']<=prior['search_requests'] and row_digest(prior.items())==old['tables']['metrics']['typed_rows_sha256']:
-                        matches.append(prior)
-        elif row_digest(counters.items())==old['tables']['metrics']['typed_rows_sha256']:matches.append(dict(counters))
-        require(len(matches)==1,'LEGACY_TYPED_DIGEST_NOT_UNIQUELY_PROVEN')
+        require(old['tables']['metrics']['rows']==len(new['metrics_profile']['counters']),'LEGACY_METRICS_ROW_COUNT')
+
+def adopt_legacy_metrics(legacy,current,reference):
+    """Explicit audited operational rebaseline; it does not prove historical counter contents."""
+    require(type(reference)is str and 0<len(reference.strip())<=1024,'ADOPTION_REFERENCE_REQUIRED')
+    validate_legacy_business(legacy,current)
+    return dict(status='AUDITED_LEGACY_METRICS_BASELINE_ADOPTION',policy=METRICS_POLICY,
+                adoption_reference=reference,legacy_snapshot=legacy,observed_snapshot=current,
+                adopted_baseline=copy.deepcopy(current),business_records_exact=True,
+                current_metrics_schema_keys_types_valid=True,metrics_history_proven=False,
+                producer_identity_proven=False,original_snapshot_modified=False,
+                automatic_baseline_refresh=False)
+
+def upgrade_legacy(legacy,current):
+    """Explicit offline proof: never refresh an opaque old baseline without a typed hash match."""
+    validate_legacy_business(legacy,current)
+    old=legacy['databases']['index'];new=current['databases']['index']
+    counters=new['metrics_profile']['counters']
+    matches=[]
+    if SEARCH_KEYS<=counters.keys():
+        for dq in range(SEARCH_DELTA_LIMIT+1):
+            for dh in range(dq+1):
+                prior=dict(counters,search_requests=counters['search_requests']-dq,search_hits=counters['search_hits']-dh)
+                if 0<=prior['search_hits']<=prior['search_requests'] and row_digest(prior.items())==old['tables']['metrics']['typed_rows_sha256']:
+                    matches.append(prior)
+    elif row_digest(counters.items())==old['tables']['metrics']['typed_rows_sha256']:matches.append(dict(counters))
+    require(len(matches)==1,'LEGACY_TYPED_DIGEST_NOT_UNIQUELY_PROVEN')
     derived=copy.deepcopy(legacy);derived['schema']=SNAPSHOT_SCHEMA
     index=derived['databases']['index']
     index['metrics_profile']=dict(policy=METRICS_POLICY,valid=True,counters=matches[0])
@@ -263,9 +279,10 @@ def load_verified(path,sha):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('--mode',choices=('Describe','Snapshot','Check','UpgradeLegacy','Migrate'),default='Describe')
+    p.add_argument('--mode',choices=('Describe','Snapshot','Check','UpgradeLegacy','AdoptLegacyMetrics','Migrate'),default='Describe')
     p.add_argument('--root',type=Path);p.add_argument('--before',type=Path);p.add_argument('--before-sha256')
     p.add_argument('--migration',type=Path);p.add_argument('--migration-sha256')
+    p.add_argument('--adoption-reference')
     a=p.parse_args()
     if a.mode=='Describe':
         print(json.dumps(dict(mode='Describe',database_writes=0,policy=METRICS_POLICY,search_delta_limit=SEARCH_DELTA_LIMIT)));return
@@ -276,6 +293,7 @@ def main():
         else:
             current=snapshot_root(a.root)
             if a.mode=='UpgradeLegacy':result=upgrade_legacy(before,current)
+            elif a.mode=='AdoptLegacyMetrics':result=adopt_legacy_metrics(before,current,a.adoption_reference)
             else:
                 migration=load_verified(a.migration,a.migration_sha256) if a.migration else None
                 result=dict(current_snapshot=current,comparison=classify(before,current,migration))

@@ -59,6 +59,15 @@ UpgradeLegacy is a separate explicit read-only proof. It keeps the original v1 b
 
 The result retains the original aggregate binding, algorithm version, observed complete v2 snapshot, separately derived v2 baseline and exact classification/delta. It reconstructs contents consistent with the old typed digest; it does not claim the original updater was a search request. Preparation accepts only a separately fixed v2 baseline and saves its fresh full observation/comparison. It never invokes UpgradeLegacy or replaces a baseline automatically.
 
+## Explicit adoption of audited operational statistics
+
+If the bounded legacy content proof fails, UpgradeLegacy remains failed and its search range never expands. A separate operator-authorized AdoptLegacyMetrics mode can establish a new operational baseline only after checking the old snapshot's own digests/integrity, exact old nonmetrics DB/table/schema/version/count evidence, and the current metrics table's complete strict schema, known key set and INTEGER values. A nonempty decision reference is required. This is a deliberate new operation, not a retry or implicit fallback of UpgradeLegacy, Check, Prepare or Apply.
+
+The independent adoption receipt keeps the old complete snapshot and new complete observation, marks past counter values and producer identity as unproven, records that all business records match, and names the adopted v2 baseline. It does not assert that old key values or causes were benign or unchanged. No old DB or metrics row is written or deleted. Unknown current key/type/schema or any old business difference rejects adoption.
+
+The old v1/new v2 bytes, typed digests, explicit decision reference and receipt are separately SHA-bound before a new intent. Future checks stay anchored to that new fixed baseline with the same strict search-pair predicate. Passing checks never adopts another baseline. Prior Apply/intent/GO approval cannot authorize the new intent.
+
+
 ## Apply integration and alternatives
 
 Apply's Check reads the SHA-bound original baseline and, after migration only, the SHA-bound CreateNew migration-result.json. The restricted expected record can be replaced only by that validated migration.after; index counters still use the original baseline. Every result is appended to DatabaseChecks before rejection. HOLD saves the guard phase and a fixed public failure code, suppressing arbitrary/private exception text.
