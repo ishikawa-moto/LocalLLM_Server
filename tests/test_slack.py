@@ -315,7 +315,9 @@ class HTTPBoundaryTests(unittest.TestCase):
                 with patch.object(gateway,'CONFIG',config),patch.object(gateway,'resource_status',return_value={'accepting_jobs':True}):
                     self.assertEqual(call('GET','/v1/slack/capabilities')[0],200)
                     self.assertEqual(call('POST','/v1/slack/chat',request())[1]['status'],'complete')
-                    with patch.object(gateway,'CONTROLLER',c,create=True):
+                    with patch.object(gateway,'CONTROLLER',c,create=True), \
+                         patch.object(gateway,'healthy',return_value=False), \
+                         patch.object(gateway,'listening',return_value=True):
                         status_code,observed=call('GET','/v1/control/status')
                     self.assertEqual(status_code,200)
                     self.assertTrue(observed['restricted_activity']['quiescent'])
