@@ -18,6 +18,8 @@ The Server page contract is1..200 result pages and0..200 progress pages, matchin
 
 Requests retain stable IDs and immutable bindings. Terminal report replay must be identical; conflicting reports cannot replace accepted results. Cancellation/expiry/deletion suppress publication even if an older complete report arrives. A cancellation ACK is not proof that the worker has stopped. Outstanding assigned cancellation remains deliverable until worker terminal acknowledgement. Tombstones cannot be reused or evicted to admit an expired ID.
 
+For an already assigned job with the Server-owned cancel flag set, a `cancelling` update may omit page counters, matching the real Client cancellation-wait envelope. It acknowledges waiting only: registration, counters and `worker_done` are unchanged, the assignment remains pending, and only a terminal acknowledgement releases it. Without the Server cancel flag, counterless `cancelling` is rejected. Counterless `queued`/`running`/`expiring`, partial counters, wrong bindings and caller-supplied cancel assertions remain invalid. The existing counterless `paused` state-busy envelope is unchanged.
+
 OCR-only bypasses the existing generation queue, whose worker can start Qwen. Explicit interpretation uses the existing local Qwen path with actual template token counting and delimited untrusted OCR text. No tools, Internet search, cloud fallback or automatic SecondBrain adoption are added. Shared LAN conversation ownership remains intentional.
 
 ## Configuration and retention

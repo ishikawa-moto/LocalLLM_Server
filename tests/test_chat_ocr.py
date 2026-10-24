@@ -160,6 +160,49 @@ class MailboxTests(MailboxFixture):
         self.assertFalse(self.box.file(v['job_id'],'.report').exists())
         self.reject(lambda:self.box.chat('artifact',dict(conversation_id=self.cid,job_id=v['job_id'],format='md')),'ocr_result_unavailable')
 
+    def test_countsless_cancel_wait_does_not_register_or_finish_worker(self):
+        v=self.submit();self.claim()
+        self.box.chat('cancel',dict(conversation_id=self.cid,job_id=v['job_id']))
+        waiting=self.update(v,'cancelling')
+        self.assertEqual(self.box.update(waiting),{'accepted':True})
+        self.box=self.open();self.assertEqual(self.box.update(waiting),{'accepted':True})
+        with self.box.db() as db:row=self.box.row(db,v['job_id'])
+        self.assertEqual((row['assigned'],row['cancel'],row['registered'],row['worker_done']),(1,1,0,0))
+        self.assertEqual((row['pages'],row['completed']),(0,0))
+        self.assertEqual(self.status()[0]['state'],'cancelled');self.assertFalse(self.status()[0]['worker_quiescent'])
+        pending=self.claim();self.assertTrue(pending['cancel_requested']);self.assertIsNone(pending['bytes'])
+        self.reject(lambda:self.box.chat('forget',dict(conversation_id=self.cid)),'ocr_conversation_busy')
+        terminal=self.update(v,'cancelled');self.box.update(terminal)
+        self.assertEqual(self.box.update(terminal),{'accepted':True});self.assertIsNone(self.claim())
+        self.assertTrue(self.status()[0]['worker_quiescent'])
+        with self.box.db() as db:self.assertEqual(self.box.row(db,v['job_id'])['registered'],0)
+        self.assertFalse(self.box.file(v['job_id'],'.report').exists())
+
+    def test_countsless_cancelling_requires_assignment_and_server_cancel_flag(self):
+        v=self.submit();waiting=self.update(v,'cancelling')
+        self.reject(lambda:self.box.update(waiting),'ocr_assignment_mismatch')
+        first=self.claim();self.reject(lambda:self.box.update(waiting),'ocr_invalid_input')
+        self.reject(lambda:self.box.update(dict(waiting,cancel_requested=True)),'ocr_invalid_input')
+        self.assertEqual(self.claim(),first);self.assertTrue(self.box.file(v['job_id'],'.input').exists())
+        with self.box.db() as db:row=self.box.row(db,v['job_id'])
+        self.assertEqual((row['cancel'],row['registered'],row['worker_done']),(0,0,0))
+        self.box.chat('cancel',dict(conversation_id=self.cid,job_id=v['job_id']))
+        for state in ('queued','running','expiring'):
+            with self.subTest(state=state):
+                self.reject(lambda:self.box.update(self.update(v,state)),'ocr_invalid_input')
+        self.reject(lambda:self.box.update(dict(waiting,page_count=1)),'ocr_invalid_input')
+        self.reject(lambda:self.box.update(dict(waiting,input_sha256='0'*64)),'ocr_assignment_mismatch')
+        self.assertFalse(self.status()[0]['worker_quiescent'])
+
+    def test_expired_countsless_cancel_wait_retains_expiry_until_terminal(self):
+        v=self.submit();self.claim();self.now+=self.box.input_ttl+1
+        self.assertTrue(self.claim()['cancel_requested'])
+        self.assertEqual(self.box.update(self.update(v,'cancelling')),{'accepted':True})
+        self.assertEqual(self.status()[0]['state'],'expired');self.assertFalse(self.status()[0]['worker_quiescent'])
+        with self.box.db() as db:self.assertEqual(self.box.row(db,v['job_id'])['registered'],0)
+        self.box.update(self.update(v,'cancelled'));self.assertIsNone(self.claim())
+        self.assertEqual(self.status()[0]['state'],'expired');self.assertTrue(self.status()[0]['worker_quiescent'])
+
     def test_expiry_and_tombstone_never_re_admit(self):
         v=self.submit();self.claim();self.now+=self.box.input_ttl+1
         self.assertEqual(self.status()[0]['state'],'expired');self.assertTrue(self.claim()['cancel_requested'])

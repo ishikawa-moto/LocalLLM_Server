@@ -337,7 +337,9 @@ class Mailbox:
                 require(row['state'] != 'cancelling' or state in ('cancelling','expiring'), 'ocr_state_regression', 409)
                 has_counts = 'page_count' in value or 'completed_pages' in value
                 require(not has_counts or ('page_count' in value and 'completed_pages' in value))
-                require(has_counts or state == 'paused')
+                # The Client's cancellation wait ACK has no page counters. Only
+                # the Server's existing cancel flag grants this exception.
+                require(has_counts or state == 'paused' or (state == 'cancelling' and row['cancel']))
                 if has_counts:
                     pages, count = value['page_count'], value['completed_pages']
                     require(type(pages) is int and type(count) is int and 0 <= count <= pages <= MAX_PAGES, 'ocr_page_limit')
