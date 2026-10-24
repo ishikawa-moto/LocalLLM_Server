@@ -528,7 +528,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"; server_version = "LocalBrainGateway/2"
     def log_message(self, fmt, *args):
         # Do not put restricted route/query identifiers into ordinary access logs.
-        if self.path.startswith("/v1/slack"): return
+        if self.path.startswith(("/v1/slack", "/v1/chat-ocr")): return
         print(f"{self.client_address[0]} {fmt % args}", flush=True)
     def allowed(self) -> bool:
         cert = self.connection.getpeercert(); allowed = self.client_address[0] in CONFIG.allowed_ips and bool(cert)
@@ -546,6 +546,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(size) if size else b""
     def do_GET(self):
         if not self.allowed(): return self.send_json(403, {"error": "client denied"})
+        if self.path.startswith("/v1/chat-ocr"): return self.chat_ocr_request()
         if self.path.startswith("/v1/slack"): return self.slack_request()
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/v1/control/job-status":
@@ -569,6 +570,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(404, {"error": "endpoint not found"})
     def do_POST(self):
         if not self.allowed(): return self.send_json(403, {"error": "client denied"})
+        if self.path.startswith("/v1/chat-ocr"): return self.chat_ocr_request()
         if self.path.startswith("/v1/slack"): return self.slack_request()
         if self.headers.get("X-LocalBrain-Data-Class") == "slack_restricted":
             return self.send_json(403, {"error":"restricted_route_required"})
@@ -625,6 +627,28 @@ class Handler(BaseHTTPRequestHandler):
                 value=json.loads(body or b"{}"); value["kind"]=proposal_kinds[self.path]; body=json.dumps(value).encode()
             return self.proxy_internal(site_port('brain'), brain_routes[self.path], model=False, body=body)
         return self.send_json(404, {"error":"endpoint not found"})
+    def chat_ocr_request(self):
+        from chat_ocr import OcrError, strict_json, MAX_REPORT, MIB
+        service = getattr(self.server, 'chat_ocr_service', None)
+        if service is None: return self.send_json(503, {'error':'ocr_disabled'})
+        actions = {'next','update','submit','status','cancel','artifact','result','forget'}
+        try:
+            action = self.path.rsplit('/',1)[-1]
+            if self.command != 'POST' or action not in actions or self.path != '/v1/chat-ocr/'+action:
+                return self.send_json(404, {'error':'ocr_not_found'})
+            service.authenticate('worker' if action in ('next','update') else 'chat', self.client_address[0],
+                self.connection.getpeercert(binary_form=True), self.headers.get('X-LocalBrain-Approval-Owner'))
+            lengths = self.headers.get_all('Content-Length', [])
+            if self.headers.get('Transfer-Encoding') or len(lengths) != 1: raise OcrError('ocr_invalid_framing')
+            size = int(lengths[0]); limit = MAX_REPORT if action == 'update' else (6*MIB if action == 'submit' else 2048)
+            if not 0 < size <= limit: raise OcrError('ocr_size_limit',413)
+            self.connection.settimeout(15); raw = self.rfile.read(size)
+            if len(raw) != size: raise OcrError('ocr_invalid_framing')
+            return self.send_json(200, service.dispatch(action,strict_json(raw)))
+        except OcrError as exc: return self.send_json(exc.status,{'error':exc.code})
+        except (ValueError, UnicodeError): return self.send_json(400,{'error':'ocr_invalid_json'})
+        except Exception: return self.send_json(503,{'error':'ocr_unavailable'})
+
     def slack_request(self):
         from slack_gateway import SlackError, strict_json
         service = getattr(self.server, "slack_service", None)
@@ -740,6 +764,10 @@ def main() -> None:
     server.slack_service = SlackService.from_root(ROOT, CONTROLLER, LoopbackModel(
         LOOPBACK, site_port('llm'), lambda: load_internal_keys()['llm']),
         site_value("client_address", "localbrain-client", ROOT), APPROVAL_OWNER, resource_status=resource_status)
+    from chat_ocr import Mailbox
+    server.chat_ocr_service = Mailbox.from_root(ROOT, site_value('client_address', 'localbrain-client', ROOT), APPROVAL_OWNER)
+    if server.chat_ocr_service is not None:
+        threading.Thread(target=server.chat_ocr_service.maintenance, daemon=True).start()
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH); context.load_cert_chain(TLS / "server.pem", TLS / "server-key.pem")
     context.load_verify_locations(TLS / "ca.pem"); context.verify_mode = ssl.CERT_REQUIRED; server.socket = context.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=idle_watch, daemon=True).start(); threading.Thread(target=CONTROLLER.ensure_base, daemon=True).start()
