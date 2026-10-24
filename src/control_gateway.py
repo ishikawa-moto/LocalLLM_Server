@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+import startup_gate
 from dataclasses import dataclass
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -130,7 +131,8 @@ class LifecycleController:
         self.audit = audit_fn
         self.condition = threading.Condition(threading.RLock())
         self.inference = threading.Semaphore(1)
-        self.state = ModelState.READY if health(site_port('llm')) else ModelState.STOPPED
+        self.activation_pending = startup_gate.enabled() and not startup_gate.opened()
+        self.state = ModelState.READY if startup_gate.opened() and health(site_port('llm')) else ModelState.STOPPED
         self.background = None
         self.active_jobs = 0
         self.queued_jobs = 0
@@ -140,15 +142,25 @@ class LifecycleController:
         self.active_connections: dict[str, http.client.HTTPConnection] = {}
         self.journal_path = journal_path
         if journal_path is not None:
-            journal_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._journal() as db:
-                db.execute("CREATE TABLE IF NOT EXISTS jobs (request_id TEXT PRIMARY KEY, role TEXT, state TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            if startup_gate.enabled():
+                startup_gate.validate_schema(journal_path)
+            else:
+                journal_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._journal() as db:
+                    db.execute("CREATE TABLE IF NOT EXISTS jobs (request_id TEXT PRIMARY KEY, role TEXT, state TEXT NOT NULL, updated_at TEXT NOT NULL)")
         self.last_model_request = clock()
         self.last_heartbeat: float | None = None
         self.last_error: str | None = None
         self.background_ready = background_ready or (lambda: self.health(site_port("brain")) and listening(site_port("proxy")))
         self.background_start = None
         self.start_admission = start_admission or (lambda: resource_status(for_start=True)["accepting_jobs"])
+
+    def refresh_after_activation(self):
+        # Reconcile an already-running model; never starts/stops a process.
+        with self.condition:
+            if self.activation_pending and startup_gate.opened():
+                self.state = ModelState.READY if self.health(site_port('llm')) else ModelState.STOPPED
+                self.activation_pending = False
 
     def snapshot(self) -> dict:
         with self.condition:
@@ -160,7 +172,7 @@ class LifecycleController:
 
     @contextlib.contextmanager
     def _journal(self):
-        connection = sqlite3.connect(self.journal_path, timeout=5)
+        connection = startup_gate.connect(self.journal_path, timeout=5)
         try:
             with connection:
                 yield connection
@@ -546,6 +558,11 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(size) if size else b""
     def do_GET(self):
         if not self.allowed(): return self.send_json(403, {"error": "client denied"})
+        if self.path == '/v1/chat-ocr/readiness': return self.ocr_readiness()
+        if startup_gate.enabled() and not startup_gate.opened():
+            if self.path == '/health': return self.send_json(200,startup_gate.metadata('gateway'))
+            return self.send_json(503,{'error':'activation_held'})
+        if startup_gate.enabled(): CONTROLLER.refresh_after_activation()
         if self.path.startswith("/v1/chat-ocr"): return self.chat_ocr_request()
         if self.path.startswith("/v1/slack"): return self.slack_request()
         parsed = urllib.parse.urlsplit(self.path)
@@ -570,6 +587,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(404, {"error": "endpoint not found"})
     def do_POST(self):
         if not self.allowed(): return self.send_json(403, {"error": "client denied"})
+        if not startup_gate.opened(): return self.send_json(503,{'error':'activation_held'})
+        if startup_gate.enabled(): CONTROLLER.refresh_after_activation()
         if self.path.startswith("/v1/chat-ocr"): return self.chat_ocr_request()
         if self.path.startswith("/v1/slack"): return self.slack_request()
         if self.headers.get("X-LocalBrain-Data-Class") == "slack_restricted":
@@ -627,6 +646,17 @@ class Handler(BaseHTTPRequestHandler):
                 value=json.loads(body or b"{}"); value["kind"]=proposal_kinds[self.path]; body=json.dumps(value).encode()
             return self.proxy_internal(site_port('brain'), brain_routes[self.path], model=False, body=body)
         return self.send_json(404, {"error":"endpoint not found"})
+    def ocr_readiness(self):
+        from chat_ocr import OcrError
+        service = getattr(self.server,'chat_ocr_service',None)
+        if service is None: return self.send_json(503,{'status':'CHAT_OCR_SERVER_NOT_READY'})
+        try:
+            role = 'chat' if self.client_address[0] in ('127.0.0.1','::1') else 'worker'
+            service.authenticate(role,self.client_address[0],self.connection.getpeercert(binary_form=True),
+                                 self.headers.get('X-LocalBrain-Approval-Owner'))
+            return self.send_json(200,startup_gate.readiness())
+        except OcrError as exc: return self.send_json(exc.status,{'error':exc.code})
+
     def chat_ocr_request(self):
         from chat_ocr import OcrError, strict_json, MAX_REPORT, MIB
         service = getattr(self.server, 'chat_ocr_service', None)
@@ -743,6 +773,8 @@ def pending_librarian_items() -> int:
 def idle_watch() -> None:
     last_librarian=0.0
     while True:
+        startup_gate.wait()
+        CONTROLLER.refresh_after_activation()
         time.sleep(min(30,max(1,CONFIG.idle_seconds/2)))
         snapshot=CONTROLLER.snapshot(); features=_brain_settings.get("features",{})
         librarian_idle=max(60,int(_brain_settings.get("librarian_idle_seconds",300)))
@@ -767,10 +799,13 @@ def main() -> None:
     from chat_ocr import Mailbox
     server.chat_ocr_service = Mailbox.from_root(ROOT, site_value('client_address', 'localbrain-client', ROOT), APPROVAL_OWNER)
     if server.chat_ocr_service is not None:
-        threading.Thread(target=server.chat_ocr_service.maintenance, daemon=True).start()
+        threading.Thread(target=startup_gate.run_after_open,args=(server.chat_ocr_service.maintenance,), daemon=True).start()
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH); context.load_cert_chain(TLS / "server.pem", TLS / "server-key.pem")
     context.load_verify_locations(TLS / "ca.pem"); context.verify_mode = ssl.CERT_REQUIRED; server.socket = context.wrap_socket(server.socket, server_side=True)
-    threading.Thread(target=idle_watch, daemon=True).start(); threading.Thread(target=CONTROLLER.ensure_base, daemon=True).start()
+    threading.Thread(target=idle_watch, daemon=True).start()
+    # A guarded deployment preserves existing model/base processes on startup.
+    # Normal authenticated requests retain their existing lifecycle behavior.
+    if not startup_gate.enabled(): threading.Thread(target=CONTROLLER.ensure_base, daemon=True).start()
     audit("gateway_started", port=CONFIG.port, allowed_ips=CONFIG.allowed_ips)
     print(f"LocalBrain Control Gateway listening on https://{ANY_ADDRESS}:{CONFIG.port}", flush=True); server.serve_forever()
 

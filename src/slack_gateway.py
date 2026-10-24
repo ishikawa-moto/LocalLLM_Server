@@ -252,6 +252,8 @@ class LoopbackModel:
             return ''.join(result)
         finally: conn.close_owned()
 
+import startup_gate
+
 class RestrictedStore:
     """Separate database, never indexed/exported by normal Brain/TaskMemory paths."""
     def __init__(self, root): self.path = Path(root)/'runtime'/'slack-restricted'/'state.sqlite3'
@@ -264,11 +266,13 @@ class RestrictedStore:
             except FileNotFoundError:
                 continue
             require(not p.is_symlink() and not (getattr(info, 'st_file_attributes', 0) & 0x400), 'unsafe_storage', 503)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path, timeout=timeout)
+        guarded_startup = startup_gate.enabled()
+        if guarded_startup: startup_gate.validate_schema(self.path)
+        else: self.path.parent.mkdir(parents=True, exist_ok=True)
+        db = startup_gate.connect(self.path, timeout=timeout)
         try:
             db.execute('PRAGMA synchronous=FULL')
-            db.executescript('''
+            if not guarded_startup: db.executescript('''
               CREATE TABLE IF NOT EXISTS retired_ids(kind TEXT NOT NULL, id TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY(kind,id));
               CREATE TABLE IF NOT EXISTS retired_sessions(session_id TEXT PRIMARY KEY, retired_at INTEGER NOT NULL);
               CREATE TABLE IF NOT EXISTS retirements(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, result TEXT NOT NULL);
@@ -319,7 +323,7 @@ class RestrictedStore:
             info = p.lstat()
             require(not p.is_symlink() and not (getattr(info, 'st_file_attributes', 0) & 0x400),
                     'unsafe_storage', 503)
-        db = sqlite3.connect(self.path.absolute().as_uri()+'?mode=ro', uri=True, timeout=0)
+        db = startup_gate.connect(self.path,timeout=0,read_only=True)
         try:
             db.execute('PRAGMA query_only=ON')
             db.execute('BEGIN')

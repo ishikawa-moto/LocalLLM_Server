@@ -182,7 +182,8 @@ class Mailbox:
         require(identifier(cid, CID))
         path = guarded(self.root/'runtime/chat.sqlite3')
         require(path.exists(), 'ocr_conversation_missing', 404)
-        db = sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=10)
+        import startup_gate
+        db = startup_gate.connect(path,timeout=10,read_only=True)
         try: require(db.execute('SELECT 1 FROM conversations WHERE id=?', (cid,)).fetchone() is not None,
                      'ocr_conversation_missing', 404)
         finally: db.close()

@@ -34,6 +34,9 @@ OCR-only never calls the generation queue. Explicit analysis uses local Qwen, re
 
 ## Qualification and limits
 
+The forward deployment, existing-history protections, startup admission gate and
+remaining production validation boundaries are described in [CHAT_OCR_DEPLOYMENT.md](CHAT_OCR_DEPLOYMENT.md).
+
 Public tests cover negative authentication, framing/CSRF, restart/lost ACK/idempotency, monotonic progress, cancellation/expiry, source deletion, report-publication crash recovery, retention/quota, invalid-result failure, artifact hash/format, conversation deletion, OCR-only zero-model and explicit-analysis budgets. The existing public regression suite is also run. An isolated browser fixture qualified PNG selection/upload, paused-state reload, completion, automatic Markdown/table JSON, text-only display of a script-like string and Markdown download. The fixture uses fake OCR/model transports; it does not measure OCR accuracy or performance.
 
 Real Client/Gateway mTLS interoperability, real OCR/model execution, final deployed Chat source identity and the combined Client/Server rollout remain unqualified. The running shared Chat and Gateway were not switched, stopped or restarted. No private image, OCR text, new credential, production DB migration, live Chat/Slack post or model request was used in this work.
