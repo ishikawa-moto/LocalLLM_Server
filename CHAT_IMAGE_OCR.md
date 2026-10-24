@@ -1,0 +1,42 @@
+# Browser Chat OCR (isolated candidate)
+
+Production is unchanged. This candidate targets Server main `dbe7343` and Client PR15 commit `c587a92a1649b1a610723ebcecca93b033bfd4a2`.
+
+## Audited authentication boundary
+
+The Server Chat client certificate and the existing pinned Client Host certificate have the same DER fingerprint. Certificate-only role separation is therefore unavailable. The agreed boundary combines the actual TLS peer certificate with the socket peer IP: intake/status/cancel/download require loopback and the existing local certificate pin; worker methods require the configured Client IP, existing Host pin and owner. Forwarded headers and body origin assertions confer no role. A program already able to use the local private key on Server is inside this local OS trust boundary. This does not isolate local programs from one another. No new certificate, CA, port or secret is introduced.
+
+The live Gateway pointer names immutable release `dcc046a`; the production Git checkout is clean at `dbe7343`. A Python listener exists on the configured Chat port, but its executable/command metadata is unavailable under this audit's privileges. The Chat scheduled task is not visible to this caller. These observations do not qualify the running Chat's source or startup identity; deployment must verify that separately without assuming that the listener proves its source.
+
+## Contract and invariants
+
+The authoritative worker contract is Client PR15's `CHAT_IMAGE_OCR.md` and `dotnet/LocalBrain.ClientHost/ChatOcrRelay.cs`. Worker `next` accepts only the poll schema and returns only `job`; a job has exactly schema/job_id/conversation_id/input_sha256/extension/formats/bytes/cancel_requested. Input is at most4MiB; next is at most6MiB. Progress registration must be acknowledged before deleting staged source bytes. An HTTP delivery alone is not registration.
+
+Worker reports are at most16MiB, artifacts at most1MiB each. Markdown is required, table JSON is automatic, HTML/CSV require explicit selection. The canonical OCR job ID is the first32hex of SHA256(`chat_` + mailbox job ID); it is not the mailbox job ID. Result source hashes, origin, local-only policy and conversation binding must be revalidated. Paused reports can omit page counts when state is busy; this does not acknowledge registration. Queued/running/paused cycles are valid, while completed-page counts must not regress.
+
+The Server page contract is1..200 result pages and0..200 progress pages, matching the existing Client maximum. A single `chat_ocr.MAX_PAGES` constant controls both validations and the public `/api/ocr/config` capability; the UI displays that capability instead of an independent limit. This corrects the earlier Server-only25-page cap, which rejected a valid26-page registration and caused repeated delivery of the same input. Progress above200 is rejected before registration; invalid terminal results above200 are not published and become the existing `OCR_INVALID_RESULT` failure. Source/response/report/artifact byte limits, registration ACK, cancel/expiry and worker resource/settings are unchanged. A200-page document may still exceed the byte, time or artifact limits;200 pages is not a guarantee of successful OCR completion or model context fit.
+
+Requests retain stable IDs and immutable bindings. Terminal report replay must be identical; conflicting reports cannot replace accepted results. Cancellation/expiry/deletion suppress publication even if an older complete report arrives. A cancellation ACK is not proof that the worker has stopped. Outstanding assigned cancellation remains deliverable until worker terminal acknowledgement. Tombstones cannot be reused or evicted to admit an expired ID.
+
+For an already assigned job with the Server-owned cancel flag set, a `cancelling` update may omit page counters, matching the real Client cancellation-wait envelope. It acknowledges waiting only: registration, counters and `worker_done` are unchanged, the assignment remains pending, and only a terminal acknowledgement releases it. Without the Server cancel flag, counterless `cancelling` is rejected. Counterless `queued`/`running`/`expiring`, partial counters, wrong bindings and caller-supplied cancel assertions remain invalid. The existing counterless `paused` state-busy envelope is unchanged.
+
+OCR-only bypasses the existing generation queue, whose worker can start Qwen. Explicit interpretation uses the existing local Qwen path with actual template token counting and delimited untrusted OCR text. No tools, Internet search, cloud fallback or automatic SecondBrain adoption are added. Shared LAN conversation ownership remains intentional.
+
+## Configuration and retention
+
+The feature is absent/disabled by default. `config/chat-ocr.example.json` documents the optional ignored `config/chat-ocr.json`; no active configuration is committed or created in production. Enabling it later requires both Server and the qualified Client relay to be deployed together. Existing TLS validation, IP allowlist, Client pin and owner remain in force. Browser requests use the existing LAN/Host/Origin/request-header checks; the trusted Chat intake computes the source hash, so LAN HTTP does not require browser WebCrypto. This does not add browser-to-Server TLS or individual user authentication to the existing shared LAN Chat.
+
+The separate ignored `runtime/chat-ocr/` spool has8 active/outstanding jobs, a256MiB total file quota and10000 durable metadata/tombstone records. Admission fails closed at those limits. Source/job expiry is2h; outputs expire24h after completion. Requests run expiry checks, and an enabled Gateway runs a60s maintenance sweep. Completed/expired/deleted IDs remain tombstones and cannot be re-admitted. The UI lists the latest64 OCR jobs per conversation; artifacts remain explicitly addressable until expiry. A stopped Gateway cannot perform a sweep; the next start/request applies expiry before returning content.
+
+Input bytes are files, never SQLite payloads. Source deletion follows committed worker registration or terminal/cancel/expiry; exact report replay can recover a crash between file publication and metadata commit. Only the spool's owned generated input/report names are expired, including orphan staging names. Unknown files are retained and count against quota. Expiry removes application files; it is not a claim of secure physical erasure from storage backups. A bound invalid terminal result becomes a visible `OCR_INVALID_RESULT` failure, without publishing it or repeatedly offering a frozen invalid result. Conversation deletion first removes its OCR output files and preserves tombstones; unsettled workers block deletion.
+
+OCR-only never calls the generation queue. Explicit analysis uses local Qwen, rejects overflow using actual template/token counts, and uses untrusted JSON-delimited document text with no tools or knowledge adoption. OCR result cards persist separately from text history; a page reload recovers them by the shared conversation ID. Only that ID is stored in browser session storage, never source bytes or OCR text. HTML/CSV downloads remain attachments; result previews use text nodes, never raw HTML.
+
+## Qualification and limits
+
+The forward deployment, existing-history protections, startup admission gate and
+remaining production validation boundaries are described in [CHAT_OCR_DEPLOYMENT.md](CHAT_OCR_DEPLOYMENT.md).
+
+Public tests cover negative authentication, framing/CSRF, restart/lost ACK/idempotency, monotonic progress, cancellation/expiry, source deletion, report-publication crash recovery, retention/quota, invalid-result failure, artifact hash/format, conversation deletion, OCR-only zero-model and explicit-analysis budgets. The existing public regression suite is also run. An isolated browser fixture qualified PNG selection/upload, paused-state reload, completion, automatic Markdown/table JSON, text-only display of a script-like string and Markdown download. The fixture uses fake OCR/model transports; it does not measure OCR accuracy or performance.
+
+Real Client/Gateway mTLS interoperability, real OCR/model execution, final deployed Chat source identity and the combined Client/Server rollout remain unqualified. The running shared Chat and Gateway were not switched, stopped or restarted. No private image, OCR text, new credential, production DB migration, live Chat/Slack post or model request was used in this work.
