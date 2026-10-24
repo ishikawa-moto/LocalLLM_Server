@@ -18,6 +18,7 @@ import time
 
 MIB = 1024 * 1024
 MAX_INPUT, MAX_REPORT, MAX_ARTIFACT = 4*MIB, 16*MIB, MIB
+MAX_PAGES = 200
 JOB = re.compile(r'[a-f0-9]{32}')
 HASH = re.compile(r'[a-f0-9]{64}')
 CID = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}')
@@ -275,7 +276,7 @@ class Mailbox:
                 result.get('input_sha256') == row['input_hash'] and result.get('origin') == 'chat' and
                 result.get('external_ai') == 'deny' and result.get('automatic_knowledge_adoption') is False and
                 result.get('status') == 'complete' and isinstance(result.get('text'), str), 'ocr_result_binding')
-        pages = result.get('pages'); require(type(pages) is list and 1 <= len(pages) <= 25, 'ocr_page_limit')
+        pages = result.get('pages'); require(type(pages) is list and 1 <= len(pages) <= MAX_PAGES, 'ocr_page_limit')
         require(len(pages) >= row['pages'] and len(pages) >= row['completed'], 'ocr_progress_regression',409)
         for index, page in enumerate(pages):
             require(type(page) is dict and page.get('page') == index and page.get('input_sha256') == row['input_hash'] and
@@ -339,7 +340,7 @@ class Mailbox:
                 require(has_counts or state == 'paused')
                 if has_counts:
                     pages, count = value['page_count'], value['completed_pages']
-                    require(type(pages) is int and type(count) is int and 0 <= count <= pages <= 25, 'ocr_page_limit')
+                    require(type(pages) is int and type(count) is int and 0 <= count <= pages <= MAX_PAGES, 'ocr_page_limit')
                     require(count >= row['completed'] and pages >= row['pages'], 'ocr_progress_regression', 409)
                 reason = value.get('wait_reason')
                 require(reason is None or identifier(reason,CODE))

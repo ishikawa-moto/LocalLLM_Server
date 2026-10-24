@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 from site_settings import site_value
-from chat_ocr import OcrError, enabled as ocr_enabled, strict_json, decoded, fields, MAX_INPUT, MAX_REPORT, MIB
+from chat_ocr import OcrError, enabled as ocr_enabled, strict_json, decoded, fields, MAX_INPUT, MAX_REPORT, MAX_PAGES, MIB
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM = ('あなたはLAN内の会話アシスタントです。ユーザーと同じ言語で自然に回答してください。'
@@ -378,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.guard(); owner=self.owner(); path=urlsplit(self.path).path
             if path == '/api/ocr/config':
-                return self.send(200,dict(enabled=self.app.ocr_enabled,max_input_bytes=4*MIB,max_pages=25,
+                return self.send(200,dict(enabled=self.app.ocr_enabled,max_input_bytes=4*MIB,max_pages=MAX_PAGES,
                                           retention_hours=24,external_ai='deny',automatic_knowledge_adoption=False))
             if path == '/api/slack-approval-entry':
                 return self.send(200, getattr(self.app, 'approval_entry', {'enabled':False}))

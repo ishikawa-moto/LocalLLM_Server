@@ -64,5 +64,5 @@ $('ocr-submit').onclick=async()=>{
   }catch(e){ocrNotice(e.message+' 応答が不明な場合、再試行では同じ依頼IDを使います。');}
   finally{ocrUploading=false;updateOcrControls();}
 };
-(async()=>{try{const cfg=await api('/api/ocr/config');ocrEnabled=cfg.enabled===true;$('ocr-tools').hidden=!ocrEnabled;await refreshOcr();}catch{}})();
+(async()=>{try{const cfg=await api('/api/ocr/config');ocrEnabled=cfg.enabled===true;$('ocr-page-limit').textContent=String(cfg.max_pages);$('ocr-tools').hidden=!ocrEnabled;await refreshOcr();}catch{}})();
 setInterval(()=>{if(!document.hidden)refreshOcr();},3000);

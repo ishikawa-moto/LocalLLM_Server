@@ -38,17 +38,18 @@ class MailboxFixture(unittest.TestCase):
     def claim(self): return self.box.next({'schema':'localbrain.chat-ocr.poll.v1'})['job']
     def update(self,v,state='running',**kw):
         return dict(schema='localbrain.chat-ocr.update.v1',job_id=v['job_id'],input_sha256=v['input_sha256'],state=state,**kw)
-    def result(self,v,table=False):
+    def result(self,v,table=False,page_count=1):
         oid=hashlib.sha256(('chat_'+v['job_id']).encode()).hexdigest()[:32]
         page=dict(page=0,source_method='ocr',status='complete',input_sha256=v['input_sha256'],external_ai='deny',network_attempts=0,
             coordinate_system=dict(units='original_image_pixels',origin='top_left',width=20,height=10,raster_width=20,raster_height=10),
             spans=[],tables=[{'rows':1,'columns':1,'cells':[]}] if table else [],text='<script>PUBLIC</script>',needs_review=True,warnings=[],
             engine=dict(engine='RapidOCR',runtime='onnxruntime',requested_providers=['CPUExecutionProvider'],threads=2))
+        pages=[dict(copy.deepcopy(page),page=index) for index in range(page_count)]
         result=dict(job_id=oid,input_file_ref='ocr:'+oid+'/input',input_sha256=v['input_sha256'],profile='AUTO',origin='chat',status='complete',
-                    text=page['text'],pages=[page],needs_review=True,external_ai='deny',automatic_knowledge_adoption=False)
+                    text='\n'.join(p['text'] for p in pages),pages=pages,needs_review=True,external_ai='deny',automatic_knowledge_adoption=False)
         artifacts=[]
         for fmt in ['md']+(['json'] if table else []):
-            raw=(json.dumps(result) if fmt=='json' else '# PUBLIC\n'+page['text']).encode()
+            raw=(json.dumps(result) if fmt=='json' else '# PUBLIC\n'+result['text']).encode()
             artifacts.append(dict(format=fmt,filename='ocr-'+v['job_id']+'.'+fmt,mime_type=ocr.FORMATS[fmt],
                                 sha256=hashlib.sha256(raw).hexdigest(),bytes=base64.b64encode(raw).decode()))
         return self.update(v,'complete',result=result,artifacts=artifacts,warnings=[],external_ai='deny',automatic_knowledge_adoption=False)
@@ -98,7 +99,7 @@ class MailboxTests(MailboxFixture):
         self.box.update(self.update(v,'paused',page_count=2,completed_pages=1,wait_reason='FOREGROUND_BUSY'))
         self.box.update(self.update(v,page_count=2,completed_pages=2,wait_reason=None))
         self.reject(lambda:self.box.update(self.update(v,page_count=2,completed_pages=1)),'ocr_progress_regression')
-        self.reject(lambda:self.box.update(self.update(v,page_count=26,completed_pages=2)),'ocr_page_limit')
+        self.reject(lambda:self.box.update(self.update(v,page_count=201,completed_pages=2)),'ocr_page_limit')
         self.reject(lambda:self.box.update(self.update(v,page_count=True,completed_pages=0)))
 
     def test_terminal_lost_ack_exact_replay_conflict_and_download(self):
@@ -210,6 +211,67 @@ class MailboxTests(MailboxFixture):
         self.box.submit(v);out=self.box.next({'schema':'localbrain.chat-ocr.poll.v1'})
         self.assertLess(len(json.dumps(out).encode()),6*ocr.MIB)
 
+    def test_26_and_200_pages_register_resume_and_complete(self):
+        for pages in (26,200):
+            with self.subTest(pages=pages):
+                self.now+=1
+                v=self.submit();first=self.claim();self.assertIsNotNone(first['bytes'])
+                self.assertEqual(self.claim(),first) # A delivery alone is not registration.
+                registration=self.update(v,'queued',page_count=pages,completed_pages=0,wait_reason=None)
+                self.assertEqual(self.box.update(registration),{'accepted':True})
+                self.assertFalse(self.box.file(v['job_id'],'.input').exists())
+                self.box=self.open();self.assertEqual(self.box.update(registration),{'accepted':True})
+                resumed=self.claim();self.assertEqual(resumed['job_id'],v['job_id']);self.assertIsNone(resumed['bytes'])
+                self.box.update(self.update(v,'paused',page_count=pages,completed_pages=pages-1,wait_reason='FOREGROUND_BUSY'))
+                self.box.update(self.update(v,page_count=pages,completed_pages=pages,wait_reason=None))
+                completed=self.result(v,page_count=pages)
+                self.box.update(completed);self.assertEqual(self.box.update(completed),{'accepted':True})
+                row=next(j for j in self.status() if j['job_id']==v['job_id'])
+                self.assertEqual((row['state'],row['page_count'],row['completed_pages']),('complete',pages,pages))
+                self.assertIsNone(self.claim())
+
+    def test_201_progress_rejected_without_registration_or_assignment_loss(self):
+        v=self.submit();first=self.claim()
+        self.reject(lambda:self.box.update(self.update(v,'queued',page_count=201,completed_pages=0)),'ocr_page_limit')
+        self.assertEqual(self.claim(),first);self.assertTrue(self.box.file(v['job_id'],'.input').exists())
+        self.box.update(self.update(v,'queued',page_count=200,completed_pages=0))
+        self.assertIsNone(self.claim()['bytes'])
+
+    def test_201_result_rejected_without_publication(self):
+        v=self.submit();self.claim();self.box.update(self.update(v,page_count=200,completed_pages=0))
+        invalid=self.result(v,page_count=201)
+        with self.box.db() as db:row=self.box.row(db,v['job_id'])
+        self.reject(lambda:self.box.validate_result(invalid,row),'ocr_page_limit')
+        self.box.update(invalid)
+        self.assertEqual(self.status()[0]['state'],'failed');self.assertEqual(self.status()[0]['error_code'],'OCR_INVALID_RESULT')
+        self.assertFalse(self.box.file(v['job_id'],'.report').exists());self.assertIsNone(self.claim())
+
+    def test_200_pages_cancel_and_expiry_still_suppress_late_result(self):
+        for expiry in (False,True):
+            with self.subTest(expiry=expiry):
+                self.now+=1;v=self.submit();self.claim()
+                self.box.update(self.update(v,'queued',page_count=200,completed_pages=0))
+                if expiry:self.now+=self.box.input_ttl+1
+                else:self.box.chat('cancel',dict(conversation_id=self.cid,job_id=v['job_id']))
+                cancelled=self.claim();self.assertTrue(cancelled['cancel_requested']);self.assertIsNone(cancelled['bytes'])
+                self.box.update(self.result(v,page_count=200))
+                row=next(j for j in self.status() if j['job_id']==v['job_id'])
+                self.assertEqual(row['state'],'expired' if expiry else 'cancelled');self.assertTrue(row['worker_quiescent'])
+                self.assertFalse(self.box.file(v['job_id'],'.report').exists());self.assertIsNone(self.claim())
+
+    def test_200_pages_preserve_report_and_artifact_byte_limits(self):
+        v=self.submit();self.claim();self.box.update(self.update(v,'queued',page_count=200,completed_pages=0))
+        oversized=self.result(v,page_count=200);oversized['result']['text']='P'*(16*ocr.MIB)
+        self.reject(lambda:self.box.update(oversized),'ocr_size_limit')
+        self.assertEqual(self.claim()['job_id'],v['job_id']);self.assertIsNone(self.claim()['bytes'])
+        completed=self.result(v,page_count=200)
+        artifact=completed['artifacts'][0];raw=b'P'*(ocr.MIB+1)
+        artifact.update(bytes=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest())
+        with self.box.db() as db:row=self.box.row(db,v['job_id'])
+        self.reject(lambda:self.box.validate_result(completed,row),'ocr_size_limit')
+        raw=raw[:-1];artifact.update(bytes=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest())
+        self.box.update(completed);self.assertEqual(self.status()[0]['state'],'complete')
+
 
 class ChatOcrIntegrationTests(MailboxFixture):
     def test_http_upload_status_download_cancel_and_zero_model(self):
@@ -225,6 +287,10 @@ class ChatOcrIntegrationTests(MailboxFixture):
             c.request('POST','/api/ocr/'+action,json.dumps(value),headers or {'X-Chat-Request':'1'})
             r=c.getresponse();out=(r.status,dict(r.getheaders()),r.read());c.close();return out
         try:
+            c=http.client.HTTPConnection(LOOPBACK,port,timeout=3)
+            c.request('GET','/api/ocr/config');r=c.getresponse();cap=json.loads(r.read());c.close()
+            self.assertEqual(r.status,200);self.assertEqual(cap['max_pages'],200)
+            self.assertEqual(fake.calls,[])
             v=self.request();del v['input_sha256']
             self.assertEqual(request('submit',v,{'X-Chat-Request':'1','Origin':'https://evil.invalid'})[0],403)
             self.assertEqual(request('submit',v)[0],200);self.assertEqual(fake.calls,[])
