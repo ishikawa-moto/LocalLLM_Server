@@ -62,7 +62,16 @@ def safe_interruption(value):
 class SlackError(Exception):
     def __init__(self, code, http=400): self.code, self.http = code, http
 
-class Deferred(Exception): pass
+DEFER_REASONS = frozenset((
+    'resource_limit_exceeded', 'resource_probe_failed', 'foreground_busy', 'background_busy',
+    'base_starting', 'base_services_unavailable', 'base_start_failed', 'model_starting',
+    'model_start_failed', 'model_not_ready', 'model_start_disabled', 'activation_pending',
+    'inference_busy', 'admission_unavailable'))
+
+class Deferred(Exception):
+    def __init__(self, reason='admission_unavailable'):
+        self.reason = reason if isinstance(reason, str) and reason in DEFER_REASONS else 'admission_unavailable'
+        super().__init__(self.reason)
 
 def require(ok, code='invalid_schema', http=400):
     if not ok: raise SlackError(code, http)
@@ -437,9 +446,11 @@ class SlackService:
                 if active and active[0] == value['session_id']:
                     return dict(status='running', retry_safe=False)
             return previous
-        if self.resource_status is not None and not self.resource_status().get('accepting_jobs', False):
-            # No reservation, model request or side effect has happened.
-            return dict(status='deferred', retry_safe=True, reason='resource_limit_exceeded')
+        if self.resource_status is not None:
+            try: admitted = self.resource_status().get('accepting_jobs', False)
+            except Exception: return self.defer(action, 'resource_probe_failed')
+            if not admitted:
+                return self.defer(action, 'resource_limit_exceeded')
         limit = min(value['max_tokens'], 1024)
         input_bytes = len(source.encode('utf-8'))
         timeout = (chat_deadline_seconds(input_bytes, value['timeout_seconds'], limit)
@@ -461,8 +472,15 @@ class SlackService:
                     self.activity_generation += 1
                     registered = True
             if retry is None and action == 'chat' and self.policy.get('model_cold_start') is True:
-                self.controller.request_background_start()
-                require(self.controller.snapshot()['state'] != 'FAILED', 'local_model_start_failed', 503)
+                start_reason = self.controller.request_background_start_reason()
+                start_state = self.controller.snapshot()['state']
+                if start_state == 'FAILED':
+                    failure = self.controller.background_failure_reason
+                    safe = failure if isinstance(failure, str) and failure in DEFER_REASONS else 'model_start_failed'
+                    self.controller.audit('restricted_admission_failed', operation=action, reason=safe)
+                require(start_state != 'FAILED', 'local_model_start_failed', 503)
+                if start_reason not in ('model_ready', 'start_requested'):
+                    return self.defer(action, start_reason)
             passes = []
             for index in range(1 if action == 'chat' else 2):
                 with self.controller.background_job(4 if action == 'chat' else 5) as lease:
@@ -554,8 +572,12 @@ class SlackService:
                               source_sha256=hashlib.sha256(source.encode()).hexdigest(), passes=passes, candidate=candidate,
                               classification=CLASSIFICATION)
                 record = dict(status='complete', candidate=candidate, review=review, review_hash=digest(review))
-        except Deferred:
-            if not reserved: return dict(status='deferred', retry_safe=True)
+        except Deferred as exc:
+            if not reserved:
+                reason = exc.reason
+                if reason == 'model_not_ready' and action == 'chat' and self.policy.get('model_cold_start') is not True:
+                    reason = 'model_start_disabled'
+                return self.defer(action, reason)
             interruption_reason = 'background_unavailable'
         except SlackError:
             interruption_reason = 'invalid_output'
@@ -594,6 +616,12 @@ class SlackService:
                         self.active.pop(value['request_id'], None)
                         self.activity_generation += 1
         return record
+    def defer(self, action, reason):
+        safe = reason if isinstance(reason, str) and reason in DEFER_REASONS else 'admission_unavailable'
+        # Fixed codes only: no request/session identifiers, payloads or exception text.
+        self.controller.audit('restricted_admission_deferred', operation=action, reason=safe)
+        return dict(status='deferred', retry_safe=True, reason=safe)
+
     def status(self, value):
         fields(value, ('operation', 'request_id', 'session_id', 'request_hash', 'restriction'))
         require(value['operation'] in ('chat','review','apply') and safe_id(value['request_id']) and safe_id(value['session_id']))

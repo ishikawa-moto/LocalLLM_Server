@@ -153,6 +153,8 @@ class LifecycleController:
         self.last_error: str | None = None
         self.background_ready = background_ready or (lambda: self.health(site_port("brain")) and listening(site_port("proxy")))
         self.background_start = None
+        self.background_start_phase = None
+        self.background_failure_reason = None
         self.start_admission = start_admission or (lambda: resource_status(for_start=True)["accepting_jobs"])
 
     def refresh_after_activation(self):
@@ -276,39 +278,48 @@ class LifecycleController:
         self.audit("model_started" if success else "model_start_failed", error=self.last_error)
         return success
 
+    def _background_start_veto(self):
+        # Called under condition; request/status data never selects an action.
+        if not startup_gate.opened(): return 'activation_pending'
+        if self.background_start is not None: return self.background_start_phase or 'model_starting'
+        if self.active_jobs or self.queued_jobs: return 'foreground_busy'
+        if self.background is not None: return 'background_busy'
+        if self.state == ModelState.FAILED: return self.background_failure_reason or 'model_start_failed'
+        if self.state not in (ModelState.STOPPED, ModelState.READY): return 'model_not_ready'
+        return None
+
     def request_background_start(self) -> bool:
+        return self.request_background_start_reason() == 'start_requested'
+
+    def request_background_start_reason(self) -> str:
         """Authenticated Slack chat may request one normal local start, without blocking its HTTP request.
 
         Read/status/review paths do not call this. A failed background start is
         not automatically retried and never force-stops production processes.
         """
         with self.condition:
-            if self.background_start is not None or self.active_jobs or self.queued_jobs or self.background is not None:
-                return False
-            if self.state not in (ModelState.STOPPED, ModelState.READY):
-                return False
+            veto = self._background_start_veto()
+            if veto: return veto
             if self.health(site_port('llm')):
                 self.state = ModelState.READY
-                return False
+                return 'model_ready'
             self.state = ModelState.STOPPED
         # GPU sampling can take seconds. Do not hold the foreground condition lock.
         try:
             if not self.start_admission():
-                return False
+                return 'resource_limit_exceeded'
         except Exception:
-            return False
+            return 'resource_probe_failed'
         with self.condition:
-            if self.background_start is not None or self.active_jobs or self.queued_jobs or self.background is not None:
-                return False
-            if self.state not in (ModelState.STOPPED, ModelState.READY):
-                return False
+            veto = self._background_start_veto()
+            if veto: return veto
             if self.health(site_port('llm')):
                 self.state = ModelState.READY
-                return False
-            if not self.background_ready():
-                return False
+                return 'model_ready'
             owner = object()
             self.background_start = owner
+            self.background_start_phase = 'base_starting'
+            self.background_failure_reason = None
             self.state, self.last_error = ModelState.STARTING, None
             self.last_model_request = self.clock()
             worker = threading.Thread(target=self._background_start_once, args=(owner,), daemon=True,
@@ -317,14 +328,39 @@ class LifecycleController:
                 worker.start()
             except Exception:
                 self.background_start = None
+                self.background_start_phase = None
+                self.background_failure_reason = 'model_start_failed'
                 self.state, self.last_error = ModelState.FAILED, 'restricted model start unavailable'
                 self.condition.notify_all()
-                return False
-            return True
+                return 'model_start_failed'
+            return 'start_requested'
 
     def _background_start_once(self, owner) -> None:
         success = False
+        failure_reason = 'base_start_failed'
         try:
+            # Guarded Gateway boot remains observation-only until an authenticated chat.
+            with self.condition:
+                if self.background_start is not owner or self.state != ModelState.STARTING: return
+                if not startup_gate.opened():
+                    failure_reason = 'activation_pending'
+                    return
+            self.audit('restricted_base_start_requested')
+            self.ensure_base()
+            if not self.background_ready(): raise ConnectionError('restricted base readiness failed')
+            self.audit('restricted_base_start_ready')
+            failure_reason = 'resource_probe_failed'
+            admitted = self.start_admission()
+            if not admitted:
+                failure_reason = 'resource_limit_exceeded'
+                return
+            with self.condition:
+                if self.background_start is not owner or self.state != ModelState.STARTING: return
+                if not startup_gate.opened():
+                    failure_reason = 'activation_pending'
+                    return
+                self.background_start_phase = 'model_starting'
+            failure_reason = 'model_start_failed'
             self.audit('restricted_model_start_requested')
             self.run_manager('StartLLM', wait=False)
             end = self.clock() + self.config.start_timeout
@@ -342,12 +378,16 @@ class LifecycleController:
             with self.condition:
                 if self.background_start is owner:
                     self.background_start = None
+                    self.background_start_phase = None
                     if self.state == ModelState.STARTING:
-                        self.state = ModelState.READY if success else ModelState.FAILED
-                        self.last_error = None if success else 'restricted model readiness failed'
+                        temporary = failure_reason in ('resource_limit_exceeded', 'resource_probe_failed', 'activation_pending')
+                        self.state = ModelState.READY if success else (ModelState.STOPPED if temporary else ModelState.FAILED)
+                        self.background_failure_reason = None if success else failure_reason
+                        self.last_error = None if success else failure_reason
                     self.last_model_request = self.clock()
                     self.condition.notify_all()
-            self.audit('restricted_model_start_ready' if success else 'restricted_model_start_finished')
+            self.audit('restricted_model_start_ready' if success else 'restricted_model_start_finished',
+                       reason='ready' if success else failure_reason)
 
     def stop(self, reason: str) -> bool:
         with self.condition:
@@ -428,10 +468,14 @@ class LifecycleController:
             if self.background is not None and priority < self.background.priority:
                 previous = self.background
                 previous.cancel('background_preempted')
-            admitted = (previous is None and self.background is None
+            candidate = (previous is None and self.background is None
                         and self.active_jobs == 0 and self.queued_jobs == 0
-                        and self.state == ModelState.READY and self.health(site_port('llm'))
-                        and self.inference.acquire(blocking=False))
+                        and self.state == ModelState.READY and self.health(site_port('llm')))
+            admitted = candidate and self.inference.acquire(blocking=False)
+            reason = ('foreground_busy' if self.active_jobs or self.queued_jobs else
+                      'background_busy' if self.background is not None or previous is not None else
+                      self.background_start_phase if self.background_start is not None else
+                      'model_not_ready' if not candidate else 'inference_busy')
             if admitted:
                 lease = Lease(priority)
                 self.background = lease
@@ -440,7 +484,7 @@ class LifecycleController:
                 # Slack source/request/session identifiers never enter normal telemetry.
                 self.active_task = {"role": "restricted-background"}
         if previous is not None: previous.abort('background_preempted')
-        if not admitted: raise Deferred()
+        if not admitted: raise Deferred(reason)
         try:
             yield lease
             lease.check()

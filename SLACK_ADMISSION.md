@@ -1,0 +1,11 @@
+# Slackの基盤起動と推論受付
+
+保護付き配備で起動したGatewayは、従来どおり、起動しただけではモデルや基盤サービスを起動しません。起動ガードが開き、認証済みの有効なSlack chat要求を受け、`model_cold_start=true`かつ資源・優先処理の条件を満たした場合に、1件の共有ワーカーが既存の`ensure_base`でSecondBrain・Embedding・Proxyの準備を確認してから、Qwenを起動します。モデルの種類、割当て、Host認証、起動ガード、推論排他は変更しません。
+
+基盤の準備と資源採取はforeground用のconditionロックの外で行い、重複要求は同じ起動ワーカーへ集約します。基盤準備後に資源を再確認し、モデル起動直前にも所有権と起動ガードを確認します。基盤・モデルの起動失敗を無限に自動再試行したり、稼働プロセスを強制停止したりしません。状態照会・capabilities・review・自動起動無効のchatでは、このワーカーを起動しません。
+
+推論を予約する前に見送る場合は、`status=deferred`、`retry_safe=true`と固定の`reason`を返します。`base_starting`、`model_starting`、`foreground_busy`、`resource_limit_exceeded`などの許可値は`tests/fixtures/slack-admission-v1.json`で管理し、Clientと同じ契約を試験します。既存のRequest IDと予約・冪等性の規則を維持します。
+
+見送りは`restricted_admission_deferred`、起動失敗は`restricted_admission_failed`として通常監査へ固定コードだけを保存します。Request ID・Session ID・本文・画像・OCR結果・例外メッセージは通常監査に追加しません。Clientは受け取った固定理由をJobに紐づけて保存します。未予約の見送り理由は過去へ遡って生成しません。
+
+これはソースの修正です。mainへのマージやpullだけでは既存の配備済みリリースは切り替わりません。本番反映は通常の配備手順で別途実施し、実モデルや私有依頼の再処理を試験代わりに行わないでください。DBスキーマ変更はありません。

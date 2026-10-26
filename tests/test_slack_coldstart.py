@@ -44,8 +44,8 @@ class ColdStartTests(unittest.TestCase):
         r.release.set();worker.join(2);self.wait(c)
         self.assertFalse(errors);self.assertTrue(entered);self.assertEqual(r.starts,1)
 
-    def test_foreground_base_or_busy_prevents_background_start(self):
-        for state in ('queue','base','busy'):
+    def test_foreground_or_busy_prevents_background_start(self):
+        for state in ('queue','busy'):
             r=Runtime();c=self.make(r,base=state!='base')
             if state=='queue':c.queued_jobs=1
             if state=='busy':c.active_jobs=1

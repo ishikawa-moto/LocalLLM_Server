@@ -150,7 +150,7 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(self.dispatch('review',request('review'))['candidate'])
     def test_busy_is_deferred_without_reserved_request(self):
         with self.c.job('normal_fixture_0001'):
-            self.assertEqual(self.dispatch('chat',request()),dict(status='deferred',retry_safe=True))
+            self.assertEqual(self.dispatch('chat',request()),dict(status='deferred',retry_safe=True,reason='foreground_busy'))
         self.assertEqual(self.dispatch('chat',request())['status'],'complete')
     def test_interrupted_generation_is_never_silently_retried(self):
         self.s.model=lambda *a: (_ for _ in ()).throw(ConnectionError('secret source must not appear'))
