@@ -23,7 +23,7 @@ class RecoveryTests(unittest.TestCase):
   value=json.loads((Path(__file__).parent/'fixtures/slack-recovery-contract.json').read_text(encoding='utf8'))
   self.assertEqual(digest(dict(action='chat',value=value['request'])),value['request_hash'])
  def test_quiescence_required_before_new_reservation_or_model(self):
-  self.model.idle=False;r=self.retry();self.assertEqual(self.dispatch(r),dict(status='deferred',retry_safe=True));self.assertEqual(self.model.calls,1)
+  self.model.idle=False;r=self.retry();self.assertEqual(self.dispatch(r),dict(status='deferred',retry_safe=True,reason='admission_unavailable'));self.assertEqual(self.model.calls,1)
   with self.service.store.db() as db:self.assertEqual(db.execute('SELECT count(*) FROM runs').fetchone()[0],1);self.assertEqual(db.execute('SELECT count(*) FROM retry_links').fetchone()[0],0)
  def test_bounded_chain_and_durable_idempotency(self):
   first=self.retry();self.assertEqual(self.dispatch(first)['status'],'interrupted');second=self.retry(first['request'],'PUBLIC_NEXT_002');self.assertEqual(self.dispatch(second)['status'],'interrupted')
