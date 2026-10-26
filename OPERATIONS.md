@@ -9,7 +9,8 @@ Set-Location C:\Users\USERNAME\Documents\LocalBrain
 
 Gatewayの監査ログは`logs\audit.jsonl`、各processの標準出力・エラーは`logs\<service>.out.log`と`logs\<service>.err.log`に保存されます。要求本文、秘密情報本文、認証トークンは監査ログへ書きません。
 
-## SecondBrain
+<a id="secondbrain"></a>
+## SecondBrainの運用
 
 ファイルまたはChatGPT export ZIPを`raw`へ取り込みます。同一内容はsource hashで重複排除され、ChatGPT conversationの更新版は原本を残したまま旧版metadataをsupersededにします。対応するMarkdown、text、RSTファイルは`SecondBrain\raw`へ直接コピーしても、アイドル司書が検出して自動queue登録します。
 
@@ -27,7 +28,8 @@ Gatewayの監査ログは`logs\audit.jsonl`、各processの標準出力・エラ
 
 高確度の秘密情報を検出した資料は`SecondBrain\quarantine`へ隔離され、検索・Git対象になりません。原本は自動削除しません。アイドル司書は有効時に未処理sourceをLocal Qwenで整理し、Codexを自動使用しません。検証可能なFACTだけをwikiへ自動昇格し、SYNTHESISとDECISIONはdraftへ保存します。任意wiki内容を直接変更するMCP toolはありません。
 
-## Codex Review Runner
+<a id="codex-review-runner"></a>
+## Codexレビュー実行ツール
 
 ClientPCの許可済みGit workspace内で使用します。
 

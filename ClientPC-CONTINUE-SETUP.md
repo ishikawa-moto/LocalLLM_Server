@@ -1,60 +1,67 @@
-# ClientPC Continue / LocalBrain setup guide
+<a id="clientpc-continue--localbrain-setup-guide"></a>
+# ClientPCのContinue／LocalBrainセットアップガイド
 
-## API key and sign-in
+<a id="api-key-and-sign-in"></a>
+## APIキーとサインイン
 
-LocalBrain Qwen does not use the OpenAI API. Do not create or paste an OpenAI API key into Continue.
+LocalBrain QwenはOpenAI APIを使用しません。Continue用のOpenAI APIキーを作成したり、貼り付けたりしないでください。
 
-The model entry uses `provider: openai` only because the loopback LocalBrain Bridge implements an OpenAI-compatible HTTP API. Its `apiBase` must remain `http://LOOPBACK_HOST:BRIDGE_PORT/v1`. The value `apiKey: local-loopback-only` is a non-secret placeholder sent only to the local bridge.
+モデル項目の`provider: openai`は、ループバックのLocalBrain BridgeがOpenAI互換HTTP APIを実装しているためだけに使用します。`apiBase`は`http://LOOPBACK_HOST:BRIDGE_PORT/v1`のままにします。`apiKey: local-loopback-only`は秘密情報ではないプレースホルダーで、ローカルBridgeだけへ送信されます。
 
-Continue Mission Control sign-in is separate from OpenAI. This installation uses Continue's Local Config. Prefer the Local Config without signing in. If Continue 2.0 requires onboarding before it exposes Local Config, sign in to Continue itself; do not enter an OpenAI API key and do not select a cloud model.
+Continue Mission ControlのサインインはOpenAIとは別です。この構成はContinueのLocal Configを使用するため、サインインせずLocal Configを使う方法を優先します。Continue 2.0でLocal Configを表示する前に初期設定が必要な場合はContinue自体へサインインし、OpenAI APIキーの入力やクラウドモデルの選択はしないでください。
 
-The official Codex extension has its own ChatGPT/OpenAI account session. Do not copy its credentials into Continue.
+公式Codex拡張は独自のChatGPT／OpenAIアカウントセッションを使用します。その認証情報をContinueへコピーしないでください。
 
-## Files installed on ClientPC
+<a id="files-installed-on-clientpc"></a>
+## ClientPCへ配置されるファイル
 
-- Continue config: `C:\Users\USERNAME\.continue\config.yaml`
-- Client settings: `C:\Users\USERNAME\AppData\Local\LocalBrain\app\clientsettings.json`
-- Client executable: `C:\Users\USERNAME\AppData\Local\LocalBrain\app\localbrain.exe`
-- Client audit log: `C:\Users\USERNAME\AppData\Local\LocalBrain\logs\audit.jsonl`
-- Startup task: `LocalBrain Client Host`
-- Local model endpoint: `http://LOOPBACK_HOST:BRIDGE_PORT/v1`
+- Continue設定：`C:\Users\USERNAME\.continue\config.yaml`
+- クライアント設定：`C:\Users\USERNAME\AppData\Local\LocalBrain\app\clientsettings.json`
+- クライアント実行ファイル：`C:\Users\USERNAME\AppData\Local\LocalBrain\app\localbrain.exe`
+- クライアント監査ログ：`C:\Users\USERNAME\AppData\Local\LocalBrain\logs\audit.jsonl`
+- 起動タスク：`LocalBrain Client Host`
+- ローカルモデルの接続先：`http://LOOPBACK_HOST:BRIDGE_PORT/v1`
 
-The bridge must listen only on `LOOPBACK_HOST`. Do not expose port BRIDGE_PORT through Windows Firewall.
+Bridgeは`LOOPBACK_HOST`だけで待ち受けます。Windows FirewallでBRIDGE_PORTを公開しないでください。
 
-## Normal Continue setup
+<a id="normal-continue-setup"></a>
+## Continueの通常設定
 
-1. Restart VS Code.
-2. Open the Continue sidebar (`Ctrl+L` unless that shortcut has been reassigned).
-3. Open the config/agent selector above the prompt and choose **Local Config**.
-4. Choose **LocalBrain Qwen 27B** as the model.
-5. Choose **Agent** mode.
-6. Open the tool policy list. Keep `brain_search`, `brain_context`, `brain_get`, `brain_find_*`, `brain_get_*`, and `brain_status` available. Read-only tools may be Automatic. Keep every `brain_propose_*` tool on Ask First.
-7. Send this smoke test:
+1. VS Codeを再起動します。
+2. Continueサイドバーを開きます（ショートカットを変更していなければ`Ctrl+L`）。
+3. 入力欄の上にある設定／エージェント選択から**Local Config**を選びます。
+4. モデルに**LocalBrain Qwen 27B**を選びます。
+5. **Agent**モードを選びます。
+6. ツールポリシー一覧を開き、`brain_search`、`brain_context`、`brain_get`、`brain_find_*`、`brain_get_*`、`brain_status`を利用可能にします。読み取り専用ツールはAutomaticでも構いません。すべての`brain_propose_*`はAsk Firstに保ちます。
+7. 次の疎通確認を送信します。
 
    `brain_statusでSecondBrainの状態を確認し、その結果を日本語で短く説明してください。ファイルは変更しないでください。`
 
-## Project allowlist
+<a id="project-allowlist"></a>
+## プロジェクト許可リスト
 
-`D:\GitHub` is a repository container, not a Git repository, so it must not be registered as one broad project. Register each real Git repository separately:
+`D:\GitHub`はリポジトリを収める親フォルダーであり、Gitリポジトリではありません。全体を1つの広いプロジェクトとして登録せず、実際のGitリポジトリを個別に登録します。
 
 ```powershell
 & "$env:LOCALAPPDATA\LocalBrain\app\localbrain.exe" register-project "D:\GitHub\REPOSITORY_NAME"
 ```
 
-## Cleanup after a failed installer run
+<a id="cleanup-after-a-failed-installer-run"></a>
+## インストーラー失敗後の整理
 
-An interrupted or failed run must not leave an encrypted client PFX in the installer cache. Remove only residual `client.pfx` files after the successful installation:
+中断・失敗した実行で、暗号化クライアントPFXをインストーラーキャッシュへ残してはいけません。インストール成功後、残存する`client.pfx`だけを削除します。
 
 ```powershell
 Get-ChildItem -LiteralPath "$env:LOCALAPPDATA\LocalBrain\installer" -Recurse -File -Filter client.pfx -ErrorAction SilentlyContinue |
   Remove-Item -Force
 ```
 
-Current launchers remove the copied PFX in a `finally` block, including on failure.
+現行の起動スクリプトは、失敗した場合も`finally`ブロックでコピーしたPFXを削除します。
 
-## Prompt to give Codex on ClientPC
+<a id="prompt-to-give-codex-on-clientpc"></a>
+## ClientPCのCodexへ渡す指示
 
-Copy the following block into the Codex VS Code extension on ClientPC:
+次のブロックをClientPCのCodex VS Code拡張へコピーします。
 
 ```text
 このPCはLocalBrainのClientPCです。LocalBrain Client HostとContinue 2.0.0は導入済みです。OpenAI APIキーや新しいクラウドモデルは追加しないでください。
@@ -79,10 +86,11 @@ Copy the following block into the Codex VS Code extension on ClientPC:
 - D:\GitHub全体を1つのprojectとして許可しない。
 ```
 
-## Expected result
+<a id="expected-result"></a>
+## 期待する結果
 
-- Continue shows `LocalBrain Qwen 27B` under Local Config.
-- A first request automatically starts Qwen on ServerPC without asking the user to resend it.
-- `brain_status` succeeds through the local MCP adapter.
-- Only actual Git roots are present in `%LOCALAPPDATA%\LocalBrain\projects.json`.
-- No OpenAI API key is stored in Continue.
+- ContinueのLocal Configに`LocalBrain Qwen 27B`が表示されます。
+- 最初の要求でServerPCのQwenが自動起動し、ユーザーに再送を求めません。
+- ローカルMCPアダプターを通じて`brain_status`が成功します。
+- `%LOCALAPPDATA%\LocalBrain\projects.json`には実際のGitルートだけが登録されます。
+- ContinueにOpenAI APIキーは保存されません。

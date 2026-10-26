@@ -1,48 +1,54 @@
-# Server integration audit and isolated correction
+<a id="server-integration-audit-and-isolated-correction"></a>
+# Server結合監査と隔離環境での修正
 
-Date: 2026-10-23. Scope: read-only production inspection, isolated candidate and public fixtures only. No deployment, main merge, model execution, real Slack posting, original-request replay, authentication change or production DB mutation is part of this change.
+日付は2026-10-23です。範囲は本番の読み取り監査、隔離候補、公開fixtureだけです。この変更に配備、mainマージ、モデル実行、実Slack投稿、元要求再送、認証変更、本番DB更新は含みません。
 
-## Relationship to running code
+<a id="relationship-to-running-code"></a>
+## 稼働コードとの関係
 
-The observed main was ec26ab902c920647f8dba0d3f3489eed4af0f821. Production had four uncommitted output-aware deadline changes: src/slack_gateway.py, tests/test_slack.py, tests/test_slack_interruptions.py and SLACK-INTERRUPTION-DIAGNOSTICS.md.
+観測したmainはec26ab902c920647f8dba0d3f3489eed4af0f821でした。本番には出力量対応期限に関する未コミット変更が4件あり、src/slack_gateway.py、tests/test_slack.py、tests/test_slack_interruptions.py、SLACK-INTERRUPTION-DIAGNOSTICS.mdでした。
 
-Their captured patch SHA256 is 3e5c597cc6a2f56f240b157e4f7fcfbbc7992d12f56a0dc15adce000c4b81324. It matches the existing output-aware deployment receipt. This candidate preserves that correction and adds the execution-contract fixes described in SERVER-EXECUTION-CONTRACT.md. It does not rewrite those production files.
+採取patchのSHA256は3e5c597cc6a2f56f240b157e4f7fcfbbc7992d12f56a0dc15adce000c4b81324で、既存の出力量対応配備receiptと一致します。この候補はその修正を保持し、SERVER-EXECUTION-CONTRACT.mdに説明する実行契約の修正を加えます。本番ファイルを書き換えるものではありません。
 
-Observed production source SHA256:
+観測した本番sourceのSHA256：
 
-| File | SHA256 |
+| ファイル | SHA256 |
 |---|---|
 | src/control_gateway.py | af87ee9394a1e5f266d3e5a4ce72321b31a971b7eb9dd518f479c02839b74765 |
 | src/slack_gateway.py | 21beac736bc9907641a3a23eb02d59b8fe9c9aae41f062b615235030019d3d50 |
 
-The Gateway PID and birth time matched the output-aware deployment receipt, and its task definition remained unchanged. Normal privileges did not expose the SYSTEM process image/command line, so this audit does not claim a fresh loaded-image/source hash attestation. Configured dependencies were hashed separately from loaded processes.
+GatewayのPIDとbirthは出力量対応配備receiptと一致し、task定義も不変でした。通常権限ではSYSTEM processのimage／command lineを取得できなかったため、新たなloaded image／source hashの証明は主張しません。設定上の依存ファイルは、loaded processと分けてhash化しました。
 
-Read-only control status reported Gateway/Brain/Proxy healthy, no loaded Qwen model and zero active/queued jobs. Reviewer task was Ready with no task instance; its saved marker was not pending. These observations do not prove all Client RAM queues or every independently dispatched reviewer process are idle.
+読み取りcontrol statusはGateway／Brain／Proxy正常、Qwen未load、active/queued0でした。Reviewer taskはReady、task instance0で、保存markerもpendingではありません。これらの観測だけではClientの全RAM queueや、別途配信したすべてのreviewer processがidleだとは証明できません。
 
-The historical Client capability attestation was preserved. This audit did not spoof the Host identity or make a fresh Host-authenticated capabilities request, and does not certify a current Client/Server integration result.
+過去のClient capability証明は保持しました。この監査ではHost identityの偽装や新しいHost認証capabilities要求を行わず、現在のClient／Server結合成功を保証しません。
 
-## Reproduced defects
+<a id="reproduced-defects"></a>
+## 再現した不具合
 
-1. Replaying a reserved live request returned interrupted even while its model callback was still running. A surviving active reservation also looked terminal through replay although bound status correctly said unresolved.
-2. Cancellation accepted after lease release could still be followed by a complete receipt.
-3. Registration was removed before terminal persistence. During that gap, status could say unresolved even though an owned finalizer was saving the result.
-4. Cancel transport I/O ran under the global registration lock, unnecessarily blocking registration/status/retirement users of that lock.
+1. 予約済みの実行中要求を再送すると、モデルcallbackがまだ稼働中でもinterruptedを返しました。残存するactive予約も再送では終端扱いになり、一方binding済みstatusは正しくunresolvedを返しました。
+2. lease解放後に受理した取消の後でもcomplete receiptが保存され得ました。
+3. 終端の永続化より前に登録を消していたため、所有finalizerが結果保存中でもstatusがunresolvedを返す隙間がありました。
+4. 取消transport I/Oを全体の登録ロック内で行い、そのロックを使う登録／status／退役を不要に遮断しました。
 
-The candidate preserves registrations through finalization, serializes cancel acceptance against terminal finalization, prevents terminal overwrite, uses running/unresolved for nonterminal replay and exposes an explicitly limited read-only activity snapshot. The execution-state correction itself does not introduce retries, force resolution, a DB reset or an implicit maintenance lock; bounded recovery is governed separately by SLACK_RECOVERY.md.
+候補は最終処理まで登録を保持し、取消受理と終端確定を直列化し、終端上書きを防ぎ、非終端再送にrunning/unresolvedを使い、範囲を明示した読み取り活動snapshotを公開します。この実行状態修正自体は再試行、強制解決、DB reset、暗黙の保守lockを導入しません。上限付き回復は別途SLACK_RECOVERY.mdで管理します。
 
-## Validation
+<a id="validation"></a>
+## 検証
 
-- Initial public contract reproduction: 10 tests, 4 assertion failures and 6 errors. Errors include intentionally absent candidate-only capability/snapshot APIs; the concurrency/state failures were also observed directly.
-- Final Slack fixture suite: 107 PASS, 0 failures, 0 errors, 0 skips; includes 14 new contract regressions.
-- Existing Gateway fixture suite: 14 PASS, 0 failures, 0 errors, 0 skips.
-- Network access was restricted to listeners bound by the public test runner. No production configuration, model endpoint, Slack account or private data was used.
+- 初回公開契約再現：10試験、assertion失敗4件、エラー6件。エラーには候補だけに存在するcapability／snapshot APIの意図的欠落を含み、並行性／状態の失敗も直接観測しました。
+- 最終Slack fixture：107 PASS、失敗0、エラー0、skip0。新しい契約回帰14件を含みます。
+- 既存Gateway fixture：14 PASS、失敗0、エラー0、skip0。
+- 通信は公開runnerがbindしたlistenerに限定し、本番設定、モデルendpoint、Slackアカウント、私有データは使用していません。
 
-Local evidence retains hashes for 103 tracked files, 23 configuration files and 59 configured dependency binaries. Private configuration values, operational receipts and DB payloads are excluded from this PR. The configured Python reported 3.12.14; installed cryptography was 50.0.2 while the original requirements-gateway.txt pinned 50.0.1. The isolated candidate now pins the same 50.0.2 runtime used by both the onsite and parent public TLS/Gateway tests, and a declaration/runtime regression enforces that binding. No production package was installed, upgraded or changed; clean-machine provisioning is a separate qualification. GGUF weights were not rehashed and no live model compatibility claim is made.
+ローカル証拠には追跡ファイル103件、設定23件、設定上の依存binary59件のhashを保持しています。私有設定値、運用receipt、DB本文はこのPRに含めません。設定Pythonは3.12.14、導入済みcryptographyは50.0.2でしたが、元requirements-gateway.txtは50.0.1を固定していました。隔離候補は実機側と親側の公開TLS／Gateway試験で使った同じ50.0.2を固定し、宣言／runtime回帰で一致を強制します。本番packageの導入・更新・変更はなく、新規PCでの導入は別検証です。GGUFは再hashしておらず、実モデル互換性も主張しません。
 
-## Remaining boundary
+<a id="remaining-boundary"></a>
+## 残る検証範囲
 
-Client consumption of v2 nonterminal responses/cancel acceptance, actual Host capability negotiation, cold-start latency, private input/OCR behavior and real inference remain unverified. The activity snapshot is not a global quiescence fence. This candidate has not been deployed or merged into main.
+Clientによるv2非終端応答／取消受理の扱い、実Host capability交渉、cold start遅延、私有入力／OCR動作、実推論は未検証です。活動snapshotは全体の静止フェンスではありません。この候補は配備・mainマージしていません。
 
-## Parent integration
+<a id="parent-integration"></a>
+## 親側への統合
 
-The onsite audit commit `2cdd796869cf696bd65e563c72c2ca0719b49a7f` is integrated into the existing bounded-recovery candidate (Server PR 4). The output-aware deadline implementation is shared, rather than duplicated. Both `localbrain.slack-execution.v2` and `quiescent-attempt-v1` are advertised; the pre-existing recovery lineage, quiescence probe and owned-socket safeguards remain. After resolving these feature-branch conflicts, the full combined public regression passed 188 tests with zero failures, errors or skips. Client in-memory transport fixtures also passed 26 checks for running/unresolved deferral, immutable status binding, no second generation transport and terminal result recovery. No production checkout or service is modified by this integration.
+実機監査commit `2cdd796869cf696bd65e563c72c2ca0719b49a7f`は既存の上限付き回復候補（Server PR 4）へ統合しています。出力量対応期限の実装は複製せず共有します。`localbrain.slack-execution.v2`と`quiescent-attempt-v1`の双方を通知し、既存の回復連鎖、静止probe、所有socket保護を保持します。feature branch競合解消後の全結合公開回帰は188件、失敗・エラー・skipは0でした。Clientのメモリー内transport fixtureも、running/unresolved見送り、固定status binding、2回目の生成transport禁止、終端結果回復について26項目成功しました。この統合で本番checkoutやサービスは変更していません。

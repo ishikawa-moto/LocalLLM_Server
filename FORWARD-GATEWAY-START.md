@@ -1,31 +1,35 @@
-# Forward start after the verified registration hold
+<a id="forward-start-after-the-verified-registration-hold"></a>
+# 登録確認で保留した後の前進起動
 
-This is a separately reviewed, start-only operation. Do not rerun the original Apply, reuse its UAC approval/GO, restore old code or DBs, repeat the migration/adoption, or launch a model.
+これは別途レビューした起動専用操作です。元Applyの再実行、そのUAC承認／GOの再利用、旧コード／DB復元、移行／採用の再実行、モデル起動はしないでください。
 
-## Proven current state
+<a id="proven-current-state"></a>
+## 確認済みの当時の状態
 
-The first native Apply stopped the owned Gateway once, adopted the operational baseline once, committed and verified restricted retry_links, and released both locks. Registration succeeded, but its post-registration string-hash check held before any start. TaskUpdated=false in that receipt does not mean registration was absent.
+最初のnative Applyは所有Gatewayを1回停止し、運用baselineを1回採用し、制限付きretry_linksをコミット・検証して、両lockを解放しました。登録は成功しましたが、登録後の文字列hash検査が起動前に保留しました。そのreceiptのTaskUpdated=falseは、登録がなかったという意味ではありません。
 
-The exact cause is proven against the saved planned hash: removing only the added RegistrationInfo/SecurityDescriptor node from current Definition.XmlText reproduces the entire pre-registration definition digest. Current task arguments, SYSTEM principal, Python image and external security descriptor match the intended values. The task is Ready with no instances. This is stronger than inferring benign formatting from an unchanged action.
+正確な原因は保存済みの計画hashで実証しています。現在のDefinition.XmlTextから追加されたRegistrationInfo/SecurityDescriptor nodeだけを除くと、登録前定義の全digestを再現できます。現在のtask引数、SYSTEM principal、Python image、外部security descriptorは予定値と一致し、taskはReady、instanceは0です。action不変だけから無害な整形差と推定するより強い証拠です。
 
-Scheduler returns different registered-XML and in-memory definition serializations, including omission/expansion and ordering of default fields. Future Apply explicitly includes the existing SDDL in the planned definition, normalizes the captured registered XML through Scheduler's in-memory schema, requires the complete canonical definition and actual security descriptor to match, and only then pins that registered raw XML. Unknown setting/security differences still refuse.
+Schedulerの登録XMLとメモリー内定義の直列化は、既定項目の省略・展開・順序などが異なります。後続Applyは計画定義へ既存SDDLを明示し、採取した登録XMLをSchedulerのメモリー内schemaで正規化して、canonical全定義と実security descriptorの一致を必須とした後、登録raw XMLを固定します。不明な設定／security差は引き続き拒否します。
 
-## Fixed start-only scope
+<a id="fixed-start-only-scope"></a>
+## 固定した起動専用範囲
 
-Resume-GatewayRelease.ps1 is restricted to the old b661b353 function library and 4f996de1 producer-barrier library. It verifies their exact byte buffers and imports function definitions only, never an old program body. It has no calls to stop, register/update tasks, install code, adopt metrics, migrate DBs or acquire the knowledge byte lock.
+Resume-GatewayRelease.ps1は、旧b661b353の関数libraryと4f996de1のproducer-barrier libraryだけに制限します。正確なbyte bufferを検証して関数定義だけを取り込み、旧プログラム本体は実行しません。停止、task登録／更新、コード導入、metrics採用、DB移行、knowledge byte lock取得の呼出しはありません。
 
-A new recovery intent binds the prior full HOLD receipt, original intent, installed original source commit/manifest/bootstrap/pointer, all installed object ACLs, current raw task XML, full Definition.XmlText, external SDDL, arguments, saved pre-registration hash and all three existing committed artifacts. The current definition's one descriptor-node insertion must still reproduce that saved hash, and its descriptor must equal the unchanged external SDDL. No general XML tolerance is used for this recovery.
+新しいrecovery intentは、以前の全HOLD receipt、元intent、導入済み元source commit／manifest／bootstrap／pointer、全導入object ACL、現在のraw Task XML、全Definition.XmlText、外部SDDL、引数、保存済み登録前hash、既存コミット済みartifact3件を結び付けます。現在定義のdescriptor node1件の追加を除くことで保存済みhashを再現し、そのdescriptorと不変の外部SDDLを一致させます。汎用的にXML差を許す回復ではありません。
 
-The original receipt and migration/adoption files stay immutable. A new receipt is created using CreateNew; unknown existing evidence cannot be overwritten. Only after initial creation succeeds does the worker own later updates. Existing artifacts must retain their fixed hashes, and the original full-DB classifier uses the single already-adopted effective anchor and restricted migration receipt. It never captures another baseline.
+元receiptと移行／採用ファイルはimmutableのままです。新receiptはCreateNewで作り、不明な既存証拠は上書きしません。初回作成に成功して初めてworkerが後続更新を所有します。既存artifactは固定hashを保持し、元の全DB classifierは既に採用した単一の有効anchorと制限付き移行receiptを使用します。別baselineを採取しません。
 
-The operation requires a new exact human-approved UAC and a new ClientMaintenanceConfirmedResumeGO with a 15-minute TTL and explicit integer active0/queued0 and no-new-requests promise. Inspect is read-only and requires neither a GO nor administrator operation. Native preflight failures are recorded to the new owned receipt.
+操作には新しい正確な人間承認のUACと、15分TTL・明示的な整数active0/queued0・新規要求停止の約束を含む新ClientMaintenanceConfirmedResumeGOが必要です。Inspectは読み取り専用でGOや管理者操作を必要としません。native事前検査の失敗も新しい所有receiptへ記録します。
 
-After exact Ready0instance/listener checks and protected-source/configuration/base-process/installed-code/ACL/full-DB checks, the worker owns the existing Librarian presence barrier, invokes the already-qualified StartExact once, records Scheduler GUID before PID/birth observation, and qualifies image/command/Scheduler parent/release/status/database results. It keeps the barrier through final checks, releases it in finally, and saves success only after release. Busy, drift, unknown identity, failed Run or failed health holds without retry or automatic restore.
+Ready・instance0・listenerの厳密な確認と、保護source／設定／基盤process／導入code／ACL／全DB検査の後、workerは既存Librarian presence barrierを所有し、検証済みStartExactを1回呼びます。PID／birth観測前にScheduler GUIDを保存し、image／command／Scheduler親／release／status／DB結果を検証します。barrierは最終検査まで保持してfinallyで解放し、解放後だけ成功を保存します。busy、差分、不明identity、Run失敗、health失敗は再試行や自動復元なしで保留します。
 
-The installed Gateway source stays at the already-installed original candidate. A new repository commit containing maintenance helpers is not a second application deployment. Client-side authenticated capabilities, Client Slack startup, public live model tests and main merge belong to the parent task. Production local-main synchronization remains deferred until successful recovery and an exact known-diff audit.
+導入済みGateway sourceは既存の元候補のままです。保守helperを含む新repository commitは、2回目のアプリ配備ではありません。Client側の認証済みcapabilities、Client Slack起動、公開実モデル試験、mainマージは親タスクが所有します。本番ローカルmain同期は、回復成功と正確な既知差分監査が終わるまで延期します。
 
-## Qualification boundary
+<a id="qualification-boundary"></a>
+## 検証の境界
 
-Public fixtures use Scheduler NewTask in memory only, without any registered task operation, to reproduce the descriptor insertion and test complete-definition validation. They reject unrelated settings/security changes, forged GO fields with both Int32 and Int64 count paths, modified existing artifacts and unknown receipt replacement. Start orchestration stubs cover producer busy, DB drift before admission, single Run failure cleanup and successful final checks. They use no production XML, SID, data, TLS credentials, model or network request.
+公開fixtureは、登録済みtask操作をせずメモリー内Scheduler NewTaskだけでdescriptor挿入を再現し、全定義検証を試験します。無関係な設定／security差、Int32とInt64双方の件数を使う偽造GO、既存artifact改変、不明receipt置換を拒否します。起動手順stubはproducer busy、受付前DB差分、Run1回の失敗後処置、成功時最終検査を扱います。本番XML、SID、データ、TLS認証情報、モデル、ネットワーク要求は使いません。
 
-Actual SYSTEM start and runtime integration remain a separate native qualification. A future failure requires preserving its evidence and a new forward plan, not re-running either operation.
+実SYSTEM起動とruntime結合は別のnative検証です。後続失敗では証拠を保持し、新たな前進計画を作り、いずれの操作も再実行しません。

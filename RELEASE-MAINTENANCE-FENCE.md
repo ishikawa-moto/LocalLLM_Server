@@ -1,35 +1,39 @@
-# Short release maintenance fence
+<a id="short-release-maintenance-fence"></a>
+# リリース用の短時間保守フェンス
 
-This is a separate, explicit maintenance operation for periodic Librarian statistics during native-UAC wait. It does not widen the normal search-counter predicate or automatically replace an earlier baseline. Parent Client maintenance GO and approval of this new fixed script/intent are required. Previous intent/GO/UAC receipts are not reusable.
+native UAC待機中の定期Librarian統計に対応する、独立した明示的保守操作です。通常の検索カウンター条件を広げたり、以前のbaselineを自動置換したりしません。親Clientの保守GOと、この新固定script／intentへの承認が必要で、以前のintent／GO／UAC receiptは再利用できません。
 
-## Scope and order
+<a id="scope-and-order"></a>
+## 範囲と順序
 
-Preparation and Inspect never acquire production locks, stop services or adopt a new baseline. Inspect verifies read-only task/assets/identity only. Prepare and Apply preflight retain a complete before/current observation and preview only: the same known metrics key set, valid strict schema/integer profile, monotonic duplicate_sources_avoided and search_requests/search_hits with hits delta <= requests delta. Every other counter and all business rows, table sets, schema, versions and integrity must remain exact.
+準備とInspectは、本番lock取得、サービス停止、新baseline採用を行いません。Inspectはtask／asset／identityの読み取り検証だけです。PrepareとApply事前検査も、完全なbefore／current観測を保持するpreviewだけです。既知metrics key集合、厳密schema／integer profile、duplicate_sources_avoidedとsearch_requests/search_hitsの単調増加、hits delta <= requests deltaを確認し、他の全カウンターと業務行・表集合・schema・version・整合性は厳密に一致させます。
 
-After regular Windows UAC, Apply verifies fixed assets/configuration, exact SYSTEM process image/command, Scheduler identity/PID/birth, protected listeners and fresh Server idle plus Client maintenance GO. It installs only the manifested code release outside the short knowledge lock. Then:
+正規Windows UAC後、Applyは固定asset／設定、正確なSYSTEM process image／command、Scheduler identity／PID／birth、保護listener、新しいServer idleとClient保守GOを確認します。manifest付きコードreleaseは短時間knowledge lockの外で導入し、その後次を行います。
 
-1. Create runtime/librarian.lock exclusively with the existing run_queue presence protocol, using the maintenance process PID/time and a unique token. Any existing file, including a stale or unreadable one, refuses before stopping Gateway. It is never removed or adopted.
-2. With this producer barrier held, stop the exact approved Gateway once and wait for Scheduler Ready. This wait and all Scheduler COM operations are outside the knowledge byte lock. Already dispatched Librarian children encounter the same marker. An already running child owns the existing marker and causes refusal.
-3. Acquire byte 0 of the existing one-byte runtime/knowledge-transaction.lock using the same Windows byte-range protocol as msvcrt.LK_NBLCK. Require bound path, length, creation time, ACL and bytes; never create, truncate, replace, delete or call the runtime guard/recovery function. Refuse contention after two seconds, with no repeated deployment retry.
-4. Under both owned fences, perform exactly one AdoptFencedMetrics from the original SHA-bound v2 snapshot. Save full original/current/adopted records and comparison to CreateNew fenced-adoption.json, then a separate SHA-bound database-fenced-baseline.json. No prior metrics receipt is relabeled as proven history. Only the audited three counters may differ at this intentional adoption; other twelve counters and all business records stay exact. The helper is read-only; physical ownership is verified by the caller, not by an arbitrary CLI token.
-5. Under that same byte lock, add and verify only restricted retry_links, retaining existing rows and user_version. Full comparison uses the fixed adopted baseline plus the restricted-only migration receipt.
-6. Always release the knowledge byte lock before updating Scheduler or starting Gateway once. Keep the Librarian marker through task update, startup and final status/database qualification, then release the owned marker in finally. Success is saved only after both releases.
-7. Thereafter normal Check stays anchored to the single effective baseline: all thirteen non-search counters exact and 0 <= hits delta <= requests delta <= 32 cumulatively. Checks never refresh it. New duplicate discovery, even if legitimate, holds. Unknown key/type/schema/business changes hold at every stage.
+1. 既存run_queue presence protocolに従い、保守process PID／時刻と固有tokenを使ってruntime/librarian.lockを排他的に新規作成します。古い・読めないものを含め既存ファイルがあればGateway停止前に拒否し、既存markerを削除・採用しません。
+2. producer barrierを保持して、厳密に承認したGatewayを1回停止し、Scheduler Readyを待ちます。この待機と全Scheduler COM操作はknowledge byte lockの外です。配信済みLibrarian childも同じmarkerへ従い、既に稼働するchildが既存markerを所有していれば拒否します。
+3. 既存1-byte runtime/knowledge-transaction.lockのbyte 0を、msvcrt.LK_NBLCKと同じWindows byte-range protocolで取得します。固定path・length・creation time・ACL・bytesを要求し、作成・truncate・置換・削除・runtime guard／recovery呼出しはしません。競合は2秒で拒否し、配備を繰り返し再試行しません。
+4. 両フェンス所有中に、元SHA固定v2 snapshotからAdoptFencedMetricsを厳密に1回だけ実行します。全original/current/adopted記録と比較をCreateNewのfenced-adoption.jsonへ保存し、別のSHA固定database-fenced-baseline.jsonも作ります。以前のmetrics receiptを証明済み履歴と読み替えません。この明示採用で変化を認めるのは監査済み3カウンターだけで、他12カウンターと全業務記録は厳密一致です。helperは読み取り専用で、物理的所有は任意CLI tokenではなく呼出し側が検証します。
+5. 同じbyte lock中に、制限付きretry_linksだけを追加・検証し、既存行とuser_versionを保持します。全比較は固定採用baselineと制限付き専用移行receiptを使います。
+6. Scheduler更新やGatewayの1回起動より先に、必ずknowledge byte lockを解放します。Librarian markerはtask更新・起動・最終status／DB検証まで保持し、finallyで所有markerを解放します。成功は両解放後だけ保存します。
+7. 以後の通常Checkは単一有効baselineへ固定し、検索以外13カウンターは不変、累積で0 <= hits delta <= requests delta <= 32を要求します。検査はbaselineを更新しません。正当でも新しい重複検出は保留し、未知key／type／schema／業務差分は全段階で保留します。
 
-No old source/DB restoration, model startup, real Slack post, original request replay, kill of unknown processes, repeated start or automatic rebaseline is part of this operation.
+旧source／DB復元、モデル起動、実Slack投稿、元要求再送、不明processのkill、反復起動、自動rebaselineは含みません。
 
-## Producer coverage and limitations
+<a id="producer-coverage-and-limitations"></a>
+## producerの範囲と限界
 
-The tracked producer inventory remains in METRICS-DEPLOYMENT-CONTRACT.md. Search/context/find and enqueue/discover_raw/promote_fact/create_draft/process_candidates use the existing knowledge guard. run_queue as a whole does not: extraction and its librarian_failures metric can occur outside that guard. The exclusive Librarian presence barrier is therefore also required. Acquiring the knowledge byte lock alone is insufficient.
+追跡producer一覧はMETRICS-DEPLOYMENT-CONTRACT.mdのままです。Search/context/findとenqueue/discover_raw/promote_fact/create_draft/process_candidatesは既存knowledge guardを使いますが、run_queue全体は使わず、抽出とlibrarian_failures更新はguard外でも起こります。そのため排他的Librarian presence barrierも必須で、knowledge byte lockだけでは不十分です。
 
-Deployment takes only the OS byte lock; it does not construct Brain or call knowledge_guard.guard, whose acquisition may recover interrupted applies. Existing producers are unchanged. Unknown direct SQL writers and writers outside these protocols are not universally fenced: full exact business checks still reject observed differences. Five read-only DB snapshots use one transaction per DB, not one atomic cross-DB checkpoint.
+配備が取得するのはOS byte lockだけです。取得時に中断applyを回復し得るBrain構築やknowledge_guard.guardは呼びません。既存producerは不変です。未知の直接SQL writerやprotocol外writerのすべてをフェンスするものではなく、観測された業務差分は全内容厳密比較で拒否します。5DBの読み取りsnapshotはDBごとに1 transactionで、DB横断atomic checkpointではありません。
 
-The byte-lock section has a 20-second cooperative budget, checked at boundaries before/after helpers. This is not a hard interruption guarantee for native disk, process or SQLite calls. No install, Scheduler COM, readiness wait or network probe belongs in that section. Existing search writers may wait up to their existing 30-second guard timeout; parent maintenance must prohibit new work during this short interval. Time overrun holds and finally releases; committed additive migration is preserved for forward investigation.
+byte-lock区間には20秒の協調予算があり、helperの前後境界で検査します。nativeディスク／process／SQLite呼出しを必ず強制中断する保証ではありません。導入、Scheduler COM、readiness待ち、network probeは区間外です。既存検索writerは既存guard timeout最大30秒まで待ち得るため、親保守確認でこの短時間の新規処理を止めます。超過時は保留してfinallyで解放し、コミット済み追加移行は前進調査用に保持します。
 
-The producer marker may span the bounded stop/start readiness waits as well as the short byte-lock section. Its ownership is held via the same Windows file object from CreateNew with denied write/delete sharing. Release uses handle-based delete disposition; no post-close pathname deletion can remove a replacement. Failure to confirm ownership or delete disposition preserves evidence and holds. Failed partial creation is cleaned only through that original handle.
+producer markerは短いbyte-lock区間だけでなく、上限付き停止／起動readiness待ちも含めて保持できます。CreateNew時から同じWindows file objectを所有し、write／delete共有を拒否します。解放にはhandleでdelete dispositionを設定し、close後に別ファイルをpath指定で消すことはしません。所有権やdelete disposition確認に失敗したら証拠を保持して保留し、部分作成失敗の後始末も元handleだけで行います。
 
-## Public qualification
+<a id="public-qualification"></a>
+## 公開試験による検証
 
-Windows fixture uses the actual knowledge_guard OS protocol on isolated public paths in both directions, two-second busy refusal, producer release after exceptions, actual run_queue locked response without discovery/extraction, denied marker rename/replacement, existing unknown marker preservation and no pathname cleanup. Python fixtures cover one-time receipt contents, strict unknown/business/schema/counter rejection, original baseline preservation and cumulative post-adoption checks. PowerShell fixtures cover pre-stop busy refusal, stop outside the byte lock, single adoption, failure/budget finally release, and Scheduler/start only after byte-lock release with producer barrier still held.
+Windows fixtureは隔離公開pathで実knowledge_guard OS protocolを双方向に使い、2秒busy拒否、例外後のproducer解放、検出／抽出なしの実run_queue locked応答、marker rename／置換拒否、不明既存marker保持、path指定の後始末禁止を試験します。Python fixtureは一度限りのreceipt内容、未知／業務／schema／counterの厳密拒否、元baseline保持、採用後の累積検査を扱います。PowerShell fixtureは停止前busy拒否、byte lock外の停止、単一採用、失敗／予算超過時finally解放、byte-lock解放後かつproducer barrier保持中だけのScheduler／起動を扱います。
 
-These fixtures do not qualify native SYSTEM task execution, production runtime integration or hard I/O deadlines. A new fixed manifest/intent and fresh parent maintenance GO must be reviewed before legitimate native UAC. Parent owns main merge.
+これらはnative SYSTEM task操作、本番runtime結合、厳密なI/O期限を証明しません。正規native UAC前に新固定manifest／intentと新しい親保守GOのレビューが必要です。mainマージは親が所有します。

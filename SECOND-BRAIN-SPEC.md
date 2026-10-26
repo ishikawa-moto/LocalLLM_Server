@@ -1,26 +1,30 @@
-# LocalBrain SecondBrain specification
+<a id="localbrain-secondbrain-specification"></a>
+# LocalBrain SecondBrainの仕様
 
-This specification supersedes earlier SecondBrain sections of the LocalBrain plan.
+この仕様は、以前のLocalBrain計画にあるSecondBrainの説明に優先します。
 
-## Operating model
+<a id="operating-model"></a>
+## 運用モデル
 
-People place source material in `raw/`. LocalBrain agents parse, normalize, deduplicate, classify, relate, and curate it. People normally review important decisions, material conflicts, secret disposition, and deletion. They do not maintain wiki pages by hand.
+人間は資料を`raw/`へ投入し、LocalBrainエージェントが解析・正規化・重複排除・分類・関連付け・整理を行います。人間は主に重要な意思決定、重大な矛盾、秘密情報の扱い、削除をレビューし、wikiページを手作業で維持することは通常求めません。
 
-`SecondBrain/AGENTS.md` is the constitution for every agent. Source text is always untrusted reference data. `raw/` content is immutable, provenance is mandatory, secrets do not enter the wiki, old knowledge is retained as superseded, and agents never delete originals.
+`SecondBrain/AGENTS.md`はすべてのエージェントが従う基本規則です。資料本文は常に信頼されない参照データとして扱います。`raw/`は変更不可、出典情報は必須、秘密情報はwikiに入れず、古い知識はsupersededとして保持します。エージェントは原本を削除しません。
 
-## Knowledge paths
+<a id="knowledge-paths"></a>
+## 知識の経路
 
-| Type | Meaning | Initial destination | Promotion |
+| 種別 | 意味 | 最初の保存先 | 昇格条件 |
 |---|---|---|---|
-| FACT | A direct, source-verifiable statement | `wiki/entities/` or `wiki/concepts/` | Automatic only for an exact source quote, complete provenance, no secret, and no material conflict |
-| SYNTHESIS | A conclusion derived across sources | `drafts/synthesis/` | Two fresh local-model review passes plus exact-quote checks against at least two distinct immutable raw sources; otherwise remain a draft |
-| DECISION | A choice affecting future implementation or operation | `drafts/pending-review/` | Codex or user review; never finalized automatically |
+| FACT | 出典から直接検証できる記述 | `wiki/entities/`または`wiki/concepts/` | 原文との完全一致引用、完全な出典情報、秘密情報なし、重大な矛盾なしの場合だけ自動昇格 |
+| SYNTHESIS | 複数の出典から導く結論 | `drafts/synthesis/` | 独立したローカルモデルレビュー2回と、異なる変更不可raw出典2件以上に対する完全一致引用検査。それ以外は下書きを維持 |
+| DECISION | 今後の実装・運用へ影響する判断 | `drafts/pending-review/` | Codexまたはユーザーのレビューが必要。自動確定しない |
 
-A DECISION stores Decision, Reason, Alternatives, Rejected alternatives, Rejected reasons, Evidence, Date, and Conditions for reconsideration.
+DECISIONには、Decision（判断）、Reason（理由）、Alternatives（選択肢）、Rejected alternatives（不採用案）、Rejected reasons（不採用理由）、Evidence（根拠）、Date（日付）、Conditions for reconsideration（再検討条件）を保存します。
 
-Every promoted statement can retain `source_id`, `source_path`, `source_type`, `source_date`, `retrieved_at`, `source_hash`, `relevant_location`, `confidence`, and `knowledge_type`. Confidence derives from direct evidence, source count, agreement, and conflicts rather than model self-assessment alone.
+昇格した各記述には`source_id`、`source_path`、`source_type`、`source_date`、`retrieved_at`、`source_hash`、`relevant_location`、`confidence`、`knowledge_type`を保持できます。確信度はモデルの自己評価だけで決めず、直接の証拠、出典数、一致・矛盾から導きます。
 
-## Pipeline
+<a id="pipeline"></a>
+## 処理パイプライン
 
 ```text
 raw -> parse -> normalize -> deduplicate -> classify -> candidate
@@ -29,22 +33,25 @@ raw -> parse -> normalize -> deduplicate -> classify -> candidate
   DECISION  -> pending review -> decisions
 ```
 
-Ingestion records a content hash and queues each new immutable source. The idle librarian also discovers supported text files copied directly into `raw/`, creates sidecar provenance, and blocks secret-bearing files from search before processing. It consumes a bounded queue through a profile-selected local model. It may start only when enabled and no foreground model job is active. It never calls Codex. Chunking is bounded, queue execution is single-instance, failures have a two-attempt ceiling, and every state is observable through `brain_status`.
+取込み時に内容ハッシュを記録し、新しい変更不可の資料をキューへ入れます。idle librarianは`raw/`へ直接コピーされた対応形式のテキストも検出し、出典の付随情報を作成して、秘密情報を含むファイルは処理前に検索対象から遮断します。プロファイルで選んだローカルモデルが上限付きキューを処理します。有効化済みでforegroundモデルジョブがない場合だけ開始でき、Codexは呼びません。分割サイズに上限があり、キュー実行は単一、失敗は2回までで、すべての状態を`brain_status`で観測できます。
 
-The feature flags are `auto_fact_promotion`, `auto_entity_update`, `auto_concept_update`, `idle_librarian`, `auto_synthesis`, and `auto_draft_review`. They can stop individual automation paths without changing raw material.
+機能フラグは`auto_fact_promotion`、`auto_entity_update`、`auto_concept_update`、`idle_librarian`、`auto_synthesis`、`auto_draft_review`です。原資料を変えず、個別の自動処理経路を停止できます。
 
-## Tool boundary
+<a id="tool-boundary"></a>
+## ツールの境界
 
-Read tools cover search, context, chunks, entities, concepts, synthesis, decisions, incidents, provenance, history, superseded knowledge, and status. ClientPC write tools only create writeback, decision, merge, or supersede proposals and remain Ask First. The ServerPC automatic reviewer may promote only source-grounded writeback and synthesis drafts through a local scheduled job. Decision, merge, supersede, conflict, and secret-disposition proposals retain human or separate required review. There is no generic wiki write, source delete, command, shell, or secret restore endpoint.
+読み取りツールは検索、文脈、チャンク、エンティティ、概念、統合知識、意思決定、インシデント、出典、履歴、superseded知識、状態を扱います。ClientPCの書込みツールはwriteback／decision／merge／supersede提案を作成するだけで、Ask Firstを維持します。ServerPCの自動レビュアーが昇格できるのは、出典で裏付けたwritebackとsynthesis下書きだけで、ローカルのスケジュールジョブを経由します。decision、merge、supersede、矛盾、秘密情報の処置には、人間または別途必須のレビューを残します。汎用wiki書込み、原本削除、コマンド、シェル、秘密情報復元のエンドポイントはありません。
 
-The reviewer uses the installed `local-qwen38` model through a fresh mTLS Gateway Critic request, never a second resident model. It checks every draft statement against exact quotes from active raw sources, requires two distinct source contents and two fresh reviewer votes, rejects stale hashes and suspected secrets, retains per-statement provenance, and commits an audit record. A draft with missing or inaccessible ClientPC source references remains `needs_evidence` and is excluded from normal search. The Windows scheduled reviewer runs one draft at a time; retry after changed evidence is automatic.
+レビュアーは導入済み`local-qwen38`モデルを、新しいmTLS Gateway Critic要求を通じて使います。別の常駐モデルは追加しません。下書きの各記述を有効raw出典の完全一致引用で検証し、異なる出典内容2件と新規レビュー票2件を要求します。古いハッシュや秘密情報の疑いを拒否し、記述ごとの出典情報を保持して監査記録をコミットします。ClientPCの出典参照が欠落・読取不能な下書きは`needs_evidence`のまま通常検索から除外します。Windowsのスケジュールレビュアーは下書きを1件ずつ処理し、証拠が変わった後の再試行は自動です。
 
-## Task writeback
+<a id="task-writeback"></a>
+## タスク終了時の書き戻し
 
-At the end of a coding task, the agent extracts reusable facts, incidents, decision candidates, synthesis candidates, benchmark results, and entity relations. A conversation may remain a source, but its full text is never copied wholesale into the wiki.
+実装タスクの終了時、エージェントは再利用可能な事実、インシデント、意思決定候補、統合知識候補、ベンチマーク結果、エンティティ間の関係を抽出します。会話は出典として保持できますが、全文をそのままwikiへコピーしません。
 
-## Evaluation and rollback
+<a id="evaluation-and-rollback"></a>
+## 評価と復元
 
-Measure retrieval success, missed requirements, Codex MAJOR findings, repeated investigations, revision count, failures caused by wrong knowledge, search time, and human maintenance time. Page count is not a KPI.
+検索成功率、見落とした要件、CodexのMAJOR指摘、同じ調査の繰返し、修正回数、誤った知識に起因する失敗、検索時間、人間の保守時間を測定します。ページ数はKPIではありません。
 
-Agent-maintained knowledge uses the dedicated SecondBrain Git repository. Each automated update records an identifiable `brain:` commit and an append-only activity log. Rollback is diff, revert, and reindex; raw content remains unchanged.
+エージェントが維持する知識は専用SecondBrain Gitリポジトリを使います。各自動更新には識別可能な`brain:`コミットと追記専用活動ログを残します。復元は差分確認、revert、再インデックスで行い、raw内容は変更しません。

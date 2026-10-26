@@ -1,73 +1,80 @@
-# Slack Server candidate contract
+<a id="slack-server-candidate-contract"></a>
+# Slack Server候補の契約
 
-Status: Server-side contract, ready for review against main. The bounded local startup path has public-input qualification; the approved installation also has a verified Chat approval entry and enabled human-bound application. Full Slack and mobile approval qualification remains separate. The separate Client repository owns Socket Mode, OCR, durable acknowledgement, Session/job retention, user administration, HTTPS/mobile approvals and outbound Slack delivery. Those features are not implemented by this Server change.
+状態は、mainに対するレビュー準備が整ったServer側契約です。上限付きローカル起動経路は公開入力で検証し、承認済み導入環境ではChat承認入口と人間に結び付く適用の有効化も確認しました。Slack全体とモバイル承認の検証は別です。Socket Mode、OCR、永続ACK、Session／job保持、利用者管理、HTTPS／モバイル承認、Slackへの送信は独立Clientリポジトリが所有し、このServer変更で実装する機能ではありません。
 
-Actual public-fixture request/reply pairs for both knowledge and Rule are in `tests/fixtures/slack-contract.json`. Its certificate, approver and owner are fixture values, not deployment identities.
+knowledgeとRule双方の実際の公開fixture要求／応答ペアは`tests/fixtures/slack-contract.json`にあります。証明書・承認者・ownerはfixture用の値で、配備identityではありません。
 
-## Configuration and identity
+<a id="configuration-and-identity"></a>
+## 設定とidentity
 
-Copy neither production configuration nor credentials into a development worktree. The two example files are disabled placeholders. Actual `config/slack-server.json`, `config/slack-web.json`, `config/private-site.json`, keys and runtime databases remain ignored.
+本番設定や認証情報を開発worktreeへコピーしません。設定例2件は無効のプレースホルダーです。実際の`config/slack-server.json`、`config/slack-web.json`、`config/private-site.json`、key、runtime DBはGit対象外を維持します。
 
-Every Slack request uses the existing Gateway mTLS listener and allowed IP check, plus the exact configured `client_address`, `X-LocalBrain-Approval-Owner` equal to `host_owner`, and the lowercase SHA256 of the DER Windows Host client certificate pinned in `slack-server.json`. A generic trusted client certificate or a Slack member name is insufficient. Use the deployed private-site owner verbatim, including case; the public example owner is only the default. Missing/invalid configuration fails closed (503); wrong Host identity returns 403. Capabilities can be read after Host authentication, even when `enabled` is false.
+全Slack要求は既存Gateway mTLS listenerと許可IP検査に加え、正確な設定`client_address`、`host_owner`と一致する`X-LocalBrain-Approval-Owner`、`slack-server.json`にpin固定したWindows Hostクライアント証明書DERの小文字SHA256を要求します。汎用の信頼済み証明書やSlack member名では不十分です。配備済みprivate-site ownerを大文字小文字までそのまま使い、公開例のownerは既定値としてだけ扱います。設定欠落／不正は安全側の503、誤Host identityは403です。`enabled`が偽でもHost認証後のcapabilities照会は可能です。
 
-`human_apply_enabled` defaults to false. Enable it only after separately qualifying the Client Host authentication, administrator registration, exact proposal display, explicit human action, CSRF protection and receipt persistence. Server trusts the authenticated Host's attestation; receipt SHA256 is integrity binding, not an independent digital signature or proof that a human saw a screen. No Slack message directly approves anything. The approved installation now enables this flag and its authenticated capabilities were checked. Public fixtures qualify the approval contract; actual adoption of private proposals and physical other-device approval remain separate qualifications.
+`human_apply_enabled`の既定値はfalseです。Client Host認証、管理者登録、正確な提案表示、人間の明示操作、CSRF保護、receipt永続化を別途検証してから有効化します。Serverが信頼するのは認証済みHostの証言であり、receipt SHA256は整合性bindingで、独立した電子署名や人間が画面を見た証明ではありません。Slackメッセージが直接承認になることはありません。承認済み導入環境では現在このflagを有効にし、認証済みcapabilitiesを検証済みです。公開fixtureは承認契約を検証しますが、私有提案の実採用と物理的な別端末承認は別検証です。
 
-## Common exact JSON input
+<a id="common-exact-json-input"></a>
+## 共通の厳密JSON入力
 
-All POST requests reject unknown top-level fields and require:
+全POST要求は未知の最上位fieldを拒否し、次を必須とします。
 
 ```json
 {"restriction":{"origin":"slack","dataClass":"slack_restricted","externalAi":"deny","cloudFallback":false}}
 ```
 
-All IDs below match `[A-Za-z0-9_-]{8,80}`. IDs are opaque, not channel names, Slack text, user names or secrets. Request body limit is 65,536 bytes; duplicate JSON keys, nonfinite numbers, duplicate Content-Length and Transfer-Encoding are rejected. All responses are nonstreaming JSON with no-store. No user-supplied model, URL, tools, functions, executable or cloud fallback is accepted.
+以下の全IDは`[A-Za-z0-9_-]{8,80}`に一致させます。IDは不透明な値で、channel名、Slack本文、利用者名、秘密情報ではありません。本文上限は65,536 bytesで、重複JSON key、非有限数、重複Content-Length、Transfer-Encodingを拒否します。応答はすべて非streaming JSONでno-storeです。利用者指定のmodel、URL、tools、functions、実行ファイル、cloud fallbackを受理しません。
 
-`GET /v1/slack/capabilities` returns `localbrain.slack-capabilities.v1` and truthful flags. `automatic_adoption`, `ordinary_secondbrain_adoption`, `external_ai` and `cloud_fallback` are false. `model_cold_start` is true only when both `enabled` and the optional `model_cold_start` boolean in the local configuration are true. Omission defaults to false; invalid types or unexpected configuration fields fail closed. Public examples keep startup disabled. `rule_proposal` follows `enabled`; `rule_activation` requires both `enabled` and `human_apply_enabled`. The existing ordinary DecisionProtocol has no safe Slack Rule contract; this candidate adds a separate, tightly limited contract below.
+`GET /v1/slack/capabilities`は`localbrain.slack-capabilities.v1`と実態に合うflagを返します。`automatic_adoption`、`ordinary_secondbrain_adoption`、`external_ai`、`cloud_fallback`はfalseです。`model_cold_start`はローカル設定の`enabled`と任意boolean `model_cold_start`が両方trueの場合だけtrueになります。省略時はfalseで、型不正や想定外設定fieldは安全側に拒否します。公開例では起動を無効にします。`rule_proposal`は`enabled`に従い、`rule_activation`は`enabled`と`human_apply_enabled`双方が必要です。既存の通常DecisionProtocolには安全なSlack Rule契約がないため、この候補で以下の限定契約を追加します。
 
-## Chat and review
+<a id="chat-and-review"></a>
+## Chatとreview
 
-`POST /v1/slack/chat` exact fields:
+`POST /v1/slack/chat`の厳密なfield：
 
 ```json
 {"request_id":"request_fixture_0001","session_id":"session_fixture_01","context":"","prompt":"Public fixture question","max_tokens":1024,"timeout_seconds":30,"restriction":{"origin":"slack","dataClass":"slack_restricted","externalAi":"deny","cloudFallback":false}}
 ```
 
-`POST /v1/slack/review` replaces `context` and `prompt` with a single string `source`; all other fields are identical. `max_tokens` must be an integer 64..2048; it is clamped to 1024. `timeout_seconds` must be an integer 5..120; it is clamped to 30 for chat and 60 total for review. Combined chat input or review source is at most 16,000 UTF8 bytes. The first review output is at most 8,000 bytes, so the fresh second prompt plus output reservation stays below the unchanged 32K context. No context/KV/model settings are changed.
+`POST /v1/slack/review`は`context`と`prompt`を単一文字列`source`に置き換え、他のfieldは同一です。`max_tokens`は整数64..2048で、1024へ制限します。`timeout_seconds`は整数5..120で、chatは30秒、reviewは合計60秒へ制限します。chat結合入力またはreview sourceは最大16,000 UTF8 bytesです。最初のreview出力を8,000 bytes以内にして、新しい2回目promptと出力予約を不変の32K context内へ収めます。context／KV／model設定は変えません。
 
-Chat success: `{"status":"complete","text":"...","classification":{...}}`.
+Chat成功：`{"status":"complete","text":"...","classification":{...}}`。
 
-Review runs two fresh local calls, one user prompt each. The first proposes `{kind:"knowledge",body,evidence}` or `{kind:"rule",body,evidence,delta}`; the second independently checks the source and candidate, returning `{pass:boolean,evidence,issues:string[]}`. Evidence must be a literal source quote; invalid output, unsupported evidence, issues, unsafe Rule output or a failed verdict yields `candidate:null`. A model verdict is not human authorization and is not a proof of factual correctness.
+Reviewはローカル呼出しを新規に2回、各user prompt1件で行います。1回目は`{kind:"knowledge",body,evidence}`または`{kind:"rule",body,evidence,delta}`を提案し、2回目はsourceと候補を独立に検査して`{pass:boolean,evidence,issues:string[]}`を返します。evidenceは出典の逐語引用が必須です。出力不正、根拠不一致、issues、安全でないRule、判定失敗は`candidate:null`にします。モデル判定は人間承認や事実の正しさの証明ではありません。
 
-Review success has exact keys `status`, `candidate`, `review`, `review_hash`. `candidate` is null, `{kind:"knowledge",body,evidence,review:{second,source_sha256}}`, or the same object with `kind:"rule"` and `delta`. A Rule delta is a nonempty subset of `locale` (`ja` or `en`) and `style` (`brief` or `normal`); all other keys/values reject. `review` is `{schema:"localbrain.slack-review.v1",request_id,session_id,source_sha256,passes:[string,string],candidate,classification}`. Both actual raw local evaluation outputs are retained in restricted storage. `review_hash` is canonical SHA256 of this entire review object. Client owns and retains the original source; Server binds its UTF8 SHA256.
+Review成功時のkeyは厳密に`status`、`candidate`、`review`、`review_hash`です。`candidate`はnull、`{kind:"knowledge",body,evidence,review:{second,source_sha256}}`、または`kind:"rule"`と`delta`を持つ同形式です。Rule deltaは`locale`（`ja`または`en`）と`style`（`brief`または`normal`）の空でない部分集合だけで、他key／値は拒否します。`review`は`{schema:"localbrain.slack-review.v1",request_id,session_id,source_sha256,passes:[string,string],candidate,classification}`です。実ローカル評価のraw出力2件を制限付きストアへ保持し、`review_hash`はこの全review objectのcanonical SHA256です。元sourceはClientが所有・保持し、ServerはUTF8 SHA256を結び付けます。
 
-Scheduling shares the actual foreground inference semaphore and admission condition. Priority is foreground > Slack chat > Slack review. A validated, Host-authenticated chat may request one asynchronous normal model start when the local opt-in flag is enabled and base services are ready. Concurrent requests share STARTING, and foreground work retains priority. Review, status and capabilities never request startup. With startup disabled, a stopped model is left stopped. Busy or not-yet-ready requests return `{"status":"deferred","retry_safe":true}` without reserving the request ID or running inference. Only that explicit pre-inference result permits retrying the identical request after readiness; uncertain requests are never blindly retried. A failed background start reaches FAILED, returns `local_model_start_failed` for chat and does not automatically retry or stop the model. Slack does not queue over foreground work or overlap inference. A chat arriving during review cancels review and defers until release. Foreground admission cancels a background lease and shuts down its original loopback socket, including when HTTPResponse has detached the connection socket. No busy-check/POST race is used for admission.
+実foreground推論semaphoreと受付conditionを共有し、優先度はforeground > Slack chat > Slack reviewです。検証済みHost認証chatは、ローカルopt-inが有効で基盤がreadyのとき、非同期の通常モデル起動を1件要求できます。同時要求はSTARTINGを共有し、foregroundが優先されます。review／status／capabilitiesは起動要求をせず、起動無効なら停止モデルを停止のまま保ちます。busy／未readyはRequest ID予約や推論なしで`{"status":"deferred","retry_safe":true}`を返します。この明示的な推論前応答だけがready後の同一要求再試行を許し、不確実要求は無条件に再試行しません。background起動失敗はFAILEDとなり、chatに`local_model_start_failed`を返し、自動再試行やモデル停止はしません。Slackはforegroundを越えてqueueを作らず推論を重ねません。review中のchatはreviewを取り消し、解放まで見送ります。foreground受付はbackground leaseを取り消して元loopback socketをshutdownし、HTTPResponseが接続socketをdetachした場合も対象です。受付にbusy確認／POST間の競合は使いません。
 
-After reservation, timeout, preemption, cancellation, transport failure or uncertain restart returns `{"status":"interrupted","retry_safe":false}` and discards partial text. Never automatically rerun such an ID. A deliberate retry must be a separately recorded attempt with a new ID; do not replay an offline Slack backlog. Completed identical requests return the persisted result; a changed request with the same ID is rejected. HTTP errors contain stable error codes, never source/model exception text or paths.
+予約後のtimeout、優先処理による中断、取消、transport失敗、不確実な再起動では`{"status":"interrupted","retry_safe":false}`を返し、部分本文を破棄します。そのIDを自動再実行してはいけません。意図した再試行は新IDの別記録attemptとし、オフラインSlack backlogを再送しません。完了済み同一要求は永続結果を返し、同IDで内容変更は拒否します。HTTP errorには安定したerror codeだけを含め、source／model例外本文やpathは出しません。
 
-`POST /v1/slack/cancel`: exact `{request_id,session_id,restriction}`. Returns `{cancelled:boolean}`. The authenticated Host must own the Session; the Server also checks the active Session match. Cancellation remains possible between the two review passes. Ordinary `/v1/control/job-status` does not expose Slack identifiers.
+`POST /v1/slack/cancel`の入力は厳密に`{request_id,session_id,restriction}`、応答は`{cancelled:boolean}`です。認証済みHostがSessionを所有し、Serverもactive Session一致を検査します。2回のreview passの間も取消可能です。通常の`/v1/control/job-status`にSlack識別子を公開しません。
 
-## Durable status (no execution)
+<a id="durable-status-no-execution"></a>
+## 永続status（実行なし）
 
-`POST /v1/slack/status` exact input `{operation,request_id,session_id,request_hash,restriction}`, where operation is `chat`, `review` or `apply`. All IDs use the same grammar; request_hash is lowercase 64-hex. For chat/review, hash canonical `{action:operation,value:the_original_request_object}`. For apply, hash the entire original apply request object (including its receipt_hash and restriction). Match this value in the Host's immutable durable reservation.
+`POST /v1/slack/status`の厳密入力は`{operation,request_id,session_id,request_hash,restriction}`で、operationは`chat`、`review`、`apply`です。ID文法は共通、request_hashは小文字64桁hexです。chat/reviewはcanonical `{action:operation,value:the_original_request_object}`をhash化し、applyはreceipt_hashとrestrictionを含む元apply要求全体をhash化します。Hostの変更不可の永続予約にある値と一致させます。
 
-Unknown returns `{state:"unknown",retry_safe:false}`. It does not prove that a concurrent/uncertain request was never accepted. A completed run returns `{state:"complete",request_hash,result,retry_safe:false}`; an atomic applied receipt returns `{state:"applied",request_hash,result,retry_safe:false}`. Active, interrupted and restart-uncertain runs return `{state:"running"|"interrupted"|"unresolved",request_hash,retry_safe:false}`. Wrong Session/hash rejects with `request_binding_mismatch` (409). Status never calls the model or applies anything. Do not automatically resend uncertain applications; reconcile their exact status or retain HOLD.
+不明なら`{state:"unknown",retry_safe:false}`を返しますが、並行／不確実要求が一度も受理されなかった証明ではありません。完了runは`{state:"complete",request_hash,result,retry_safe:false}`、atomic適用receiptは`{state:"applied",request_hash,result,retry_safe:false}`です。active／中断／再起動不確実runは`{state:"running"|"interrupted"|"unresolved",request_hash,retry_safe:false}`を返します。Session／hash不一致は`request_binding_mismatch`（409）です。statusはモデル呼出しや適用をしません。不確実なapplyを自動再送せず、厳密statusを照合するかHOLDを維持します。
 
-## Immutable restricted proposal
+<a id="immutable-restricted-proposal"></a>
+## 変更不可の制限付き提案
 
-`POST /v1/slack/proposal`: exact `{proposal_id,review_request_id,session_id,restriction}`. Requires a completed, non-null Server review in the same Session. Client cannot substitute candidate content. Returns `{status:"proposed_restricted",proposal_hash,payload}`. Payload exact fields:
+`POST /v1/slack/proposal`の入力は厳密に`{proposal_id,review_request_id,session_id,restriction}`です。同Sessionの完了済み非null Server reviewを必要とし、Clientが候補内容を差し替えることはできません。`{status:"proposed_restricted",proposal_hash,payload}`を返します。payloadの厳密fieldは次のとおりです。
 
 ```text
 schema = localbrain.slack-proposal.v1
 proposal_id, session_id, review_hash, candidate, classification, target, base_hash, new_hash
 ```
 
-For knowledge, `target` is `restricted-knowledge`, `base_hash` is an empty string, and `new_hash` is the candidate hash. For Rule, `target` is exactly `slack-response-policy`, and the proposal also contains `rule_diff:{before,delta,after}`. Before/after are exact `{locale,style}` values; default is `{locale:"ja",style:"normal"}`. Base/new hashes bind the complete before/after rule object `{schema:"localbrain.slack-rule.v1",target:"slack-response-policy",values:{locale,style},classification}`. Empty changes reject. A repeated proposal returns its original immutable base even after a later adoption.
+knowledgeの`target`は`restricted-knowledge`、`base_hash`は空文字列、`new_hash`は候補hashです。Ruleの`target`は厳密に`slack-response-policy`で、`rule_diff:{before,delta,after}`を含みます。before/afterは厳密な`{locale,style}`で、既定は`{locale:"ja",style:"normal"}`です。base/new hashは全before/after Rule object `{schema:"localbrain.slack-rule.v1",target:"slack-response-policy",values:{locale,style},classification}`へ結び付けます。空の変更は拒否し、後で別採用があっても同一提案の再要求は元の変更不可baseを返します。
 
-The proposal hash is SHA256 of canonical payload JSON. Repeating the identical proposal is idempotent; using its ID for different content is rejected. Source SHA256, both actual evaluations, the exact Rule target/diff/base/new hashes and classification stay bound through the candidate/review/proposal hashes.
+proposal hashはcanonical payload JSONのSHA256です。同一提案の反復は冪等で、別内容へのID再利用は拒否します。Source SHA256、実評価2件、厳密Rule target／diff／base／new hash、classificationをcandidate／review／proposal hash経由で保持します。
 
-## Human-only restricted adoption
+<a id="human-only-restricted-adoption"></a>
+## 人間だけが承認する制限付き採用
 
-`POST /v1/slack/apply`: exact `{request_id,proposal_id,proposal_hash,session_id,approval,restriction}`. Disabled unless `human_apply_enabled` is true. `approval` has exactly:
+`POST /v1/slack/apply`の入力は厳密に`{request_id,proposal_id,proposal_hash,session_id,approval,restriction}`です。`human_apply_enabled`がtrueでない限り無効です。`approval`のfieldは次だけです。
 
 ```json
 {
@@ -91,42 +98,46 @@ The proposal hash is SHA256 of canonical payload JSON. Repeating the identical p
 }
 ```
 
-Times are integer Unix seconds: `issued_at <= now < expires_at`, lifetime 1..600 seconds. `receipt_hash` hashes the approval object without `receipt_hash`. All hashes use UTF8 JSON, sorted keys, compact separators, no ASCII escaping, no NaN. Host must use an implementation matching those canonical bytes (including its Unicode escaping); display and persist the exact proposal before issuing a receipt. IDs, proposal/review hashes, target, base/new hashes, Session, action, Host owner/certificate, administrator, expiry and nonce are bound. Client must display the exact target and before/after Rule diff before approval. The public `tests/fixtures/slack-canonical.json` vector includes Japanese, supplementary Unicode, newline and punctuation to check Host canonicalization. The outer request ID is additionally bound by the durable application hash.
+時刻は整数Unix秒で、`issued_at <= now < expires_at`、有効期間1..600秒です。`receipt_hash`は`receipt_hash`自身を除くapproval objectのhashです。全hashはUTF8 JSON、key整列、compact区切り、ASCII escapeなし、NaNなしで計算します。HostはUnicode escapeを含めcanonical bytesが一致する実装を使い、receipt発行前に正確な提案を表示・永続化します。ID、proposal／review hash、target、base/new hash、Session、action、Host owner／証明書、管理者、期限、nonceを結び付けます。Clientは承認前に厳密targetとRuleのbefore/after差分を表示します。公開vector `tests/fixtures/slack-canonical.json`は日本語、補助Unicode、改行、記号を含み、Host正規化を検査します。外側Request IDも永続application hashで結び付けます。
 
-Approval ID, nonce, outer request ID and one accepted row per proposal are consumed atomically in SQLite. While the Session is open, identical application retries return the original result even after expiry; changed replays reject. After retirement, reconcile the preserved application through status rather than resubmitting apply. Success includes `{status:"applied_restricted",proposal_id,proposal_hash,target,new_hash,classification}`, **not ordinary SecondBrain adoption**. It writes only restricted storage. A Rule changes only the enumerated Slack chat policy in that same SQLite transaction. The current base hash is checked under the write transaction; stale concurrent proposals reject without consuming approval. Later Slack chats use the resulting locale/style in their system prompt. Ordinary Actor prompts, Continue rules, arbitrary files, Git/shell/admin operations, security, permissions and authentication are unchanged. No LLM is called during adoption.
+approval ID、nonce、外側Request ID、proposalごと1行のaccepted記録をSQLiteでatomicに消費します。Sessionがopenなら、同一apply再試行は期限後も元結果を返し、変更再送は拒否します。退役後はapply再送ではなくstatusで保持済みapplicationを照合します。成功は`{status:"applied_restricted",proposal_id,proposal_hash,target,new_hash,classification}`であり、**通常SecondBrainへの採用ではありません**。制限付きストアだけへ書き、Ruleは同じSQLite transaction内で列挙済みSlack chat policyだけを変更します。write transaction内でcurrent base hashを検査し、古い並行提案は承認を消費せず拒否します。以後のSlack chatはlocale/styleをsystem promptに使用します。通常Actor prompt、Continue規則、任意file、Git／shell／管理者操作、security、権限、認証は不変です。採用中にLLMを呼びません。
 
-## Restricted data boundary
+<a id="restricted-data-boundary"></a>
+## 制限付きデータの境界
 
-Server state lives only in ignored `runtime/slack-restricted/state.sqlite3` (runs, proposals, approval receipts, accepted restricted items, enumerated Slack rule state). Symlink/reparse storage paths are rejected. Nothing is inserted into normal SecondBrain, Chat history, embeddings, TaskMemory or normal source-control/export paths. Original and derived data carry `origin=slack`, `data_class=slack_restricted`, `external_ai=deny`, `cloud_fallback=false`. Restricted route access logging is suppressed; normal lifecycle telemetry gets only a generic background role, no Slack request/Session/source IDs.
+Server状態はGit対象外の`runtime/slack-restricted/state.sqlite3`だけに置きます（runs、proposals、approval receipt、accepted制限項目、列挙Slack rule state）。symlink／reparse storage pathを拒否します。通常SecondBrain、Chat履歴、embedding、TaskMemory、通常source control／exportへ挿入しません。原本と派生データには`origin=slack`、`data_class=slack_restricted`、`external_ai=deny`、`cloud_fallback=false`を付けます。制限routeのaccess logは抑制し、通常lifecycle telemetryには一般的background roleだけを出し、Slack Request／Session／source IDは出しません。
 
-Ordinary Gateway proxy routes reject explicit Slack restriction metadata, including nested classification or `X-LocalBrain-Data-Class: slack_restricted`. Server cannot infer classification after a trusted Host removes it. Client RestrictedExecution egress enforcement is mandatory and remains to be jointly qualified. This is not an OS sandbox or a promise against an administrator copying the restricted database. Treat whole-machine/local backups as private; never upload runtime or copied source/receipts as review packets. Host-notified logical Session retirement is implemented below. Server does not run its own 30-day/7-day policy or scheduler. Corpus reading/search and paired retention/outbox qualification remain open; production use remains HOLD.
+通常Gateway proxy経路は、ネストしたclassificationや`X-LocalBrain-Data-Class: slack_restricted`を含む明示Slack restrictionを拒否します。信頼されたHostが分類を除いた後はServerに推定できません。Client RestrictedExecutionの送信先制御は必須で、共同検証が残っています。これはOS sandboxや管理者による制限DBのコピーを防ぐ保証ではありません。PC全体／ローカルbackupは私有として扱い、runtimeやコピーしたsource／receipt本文をreview packetへuploadしません。Host通知のlogical Session退役は以下に実装します。Server自身が30日／7日保持方針やschedulerを実行することはありません。corpus読取／検索と両側の保持／outbox検証は残件で、本番利用はHOLDです。
 
-## Host-notified Session retirement
+<a id="host-notified-session-retirement"></a>
+## Host通知によるSession退役
 
-`POST /v1/slack/retire` uses the same enabled-feature guard, exact Host IP/owner/pinned mTLS certificate, framing limits and restriction policy. Input has exactly `{request_id,session_id,restriction}`; IDs use the same opaque 8..80-character grammar. No reason, source, path, age or model options are accepted. `session_retirement` in capabilities follows `enabled`.
+`POST /v1/slack/retire`は同じ有効化guard、厳密Host IP／owner／pin固定mTLS証明書、framing制限、restriction方針を使います。入力は厳密に`{request_id,session_id,restriction}`で、IDは共通の不透明8..80文字文法です。reason、source、path、age、model optionsは受け取りません。capabilitiesの`session_retirement`は`enabled`に従います。
 
-The Windows Host commits its own Session deletion and a non-PII retirement outbox in one transaction after applying the 30-day/7-day rules. Before doing so, it must protect Sessions with sending/uncertain/unresolved applications. This three-field request cannot report the Host's private uncertainty state: Server does not independently infer it or certify that the Host applied its retention rules correctly. Host must persist/retry the same outbox ID on lost responses; it must not reconstruct deleted Slack history.
+Windows Hostは30日／7日規則の適用後、自身のSession削除と非PII退役outboxを1 transactionでcommitします。その前にsending／uncertain／unresolved applicationを持つSessionを保護します。この3-field要求はHostの私有の不確実状態を伝えられないため、Serverは独立推定やHostの保持規則適用の正しさを保証しません。応答紛失時は同じoutbox IDを永続化して再試行し、削除したSlack履歴を再構成してはいけません。
 
-Exact success: `{status:"retired",session_id,request_id,adopted_knowledge_preserved:true}`. Exact busy: `{status:"deferred",retry_safe:true}`. Any active Session execution (including the admission-before-reservation window), local application in progress, unfinished durable run or SQLite writer contention defers without canceling jobs, starting models or releasing someone else's lock. Restart-uncertain active runs stay protected until separately reconciled; there is no timeout-based forced cleanup.
+厳密な成功応答は`{status:"retired",session_id,request_id,adopted_knowledge_preserved:true}`、busyは`{status:"deferred",retry_safe:true}`です。Sessionのactive実行（受付から予約前までを含む）、ローカルapplication実行中、未完の永続run、SQLite writer競合は、job取消・モデル起動・他者lock解放なしで見送ります。再起動不確実なactive runは別途照合まで保護し、timeoutによる強制整理はしません。
 
-One SQLite transaction removes that Session's unadopted proposals, chat results and unadopted review results, including stored evaluation text. It preserves every accepted restricted knowledge/Rule record, current Slack Rule state, approval/nonce/application receipts, adopted proposals and the complete two-pass review audit bound to each accepted record. Other Sessions are unchanged. Required adoption-audit inconsistency rejects with `retirement_integrity` (409); partial failures roll back payload deletion and tombstones together. Applied status receipts remain readable with their original Session/request hash after retirement.
+単一SQLite transactionで、そのSessionの未採用提案、chat結果、未採用review結果（保存済み評価文を含む）を削除します。accepted制限knowledge／Rule、現行Slack Rule state、approval／nonce／application receipt、採用済みproposal、各accepted記録へ結び付く全2-pass review auditはすべて保持し、他Sessionは変更しません。必須採用auditが不整合なら`retirement_integrity`（409）で拒否し、部分失敗ではpayload削除とtombstoneを一緒にrollbackします。退役後も元Session／request hashでapplied status receiptを読めます。
 
-Retirement leaves opaque Session and purged request/proposal ID tombstones plus the exact metadata-only retirement response. The same retirement ID/Session returns that response; reusing that retirement ID for another Session rejects `retirement_id_conflict` (409). A new retirement ID for an already retired Session is an idempotent metadata-only acknowledgement for the new ID. No source content enters access/audit logs or Git.
+退役後は不透明Sessionと削除したrequest／proposal IDのtombstone、正確なmetadata限定退役応答を保持します。同retirement ID／Sessionは同じ応答を返し、別Sessionへそのretirement IDを再利用すると`retirement_id_conflict`（409）です。退役済みSessionへの新retirement IDは新IDに対する冪等metadata限定ACKになります。source内容をaccess／audit logやGitへ出しません。
 
-Late chat/review/proposal/apply attempts against a retired Session reject `session_retired` (409), subject to the existing authentication/enablement checks. Purged request/proposal IDs cannot be rebound to a new Session (`request_retired` / `proposal_retired`, 409). A new incarnation of an expired Slack thread therefore needs a new Session ID and fresh request/proposal IDs. Tombstones are not age-expired or exported. Ordinary model status does not expose them.
+退役Sessionへの遅延chat／review／proposal／applyは、既存認証／有効化検査に従ったうえで`session_retired`（409）を返します。削除済みrequest／proposal IDは新Sessionに結び直せません（`request_retired`／`proposal_retired`、409）。期限切れSlack threadの新しい世代には新Session IDと新request／proposal IDが必要です。tombstoneは経年削除もexportもせず、通常model statusにも公開しません。
 
-Deletion enables SQLite `secure_delete` for the operation. This is logical record retirement with deleted database cells zeroed, not a claim of forensic erasure of old WAL frames, external backups, process memory or the entire filesystem. No VACUUM, forced checkpoint, arbitrary file deletion, model call or service operation occurs. The public fixture tests zeroed deleted content in normal rollback-journal mode; WAL/backups and paired production retirement remain unqualified. Never roll back to a Slack-enabled Server version that ignores tombstones; disable Slack or keep the compatible guard, and never restore an older database to revive retired Sessions.
+削除操作ではSQLite `secure_delete`を有効にします。削除cellをゼロ化するlogical退役であり、旧WAL frame、外部backup、process memory、全file systemからの法科学的消去を主張しません。VACUUM、強制checkpoint、任意file削除、モデル呼出し、サービス操作は行いません。公開fixtureは通常rollback-journal modeで削除内容のゼロ化を試験し、WAL／backupと両側の本番退役は未検証です。tombstoneを無視するSlack有効Server旧版へ戻さず、Slackを無効化するか互換guardを維持し、古いDB復元で退役Sessionを復活させてはいけません。
 
-See `tests/fixtures/slack-retire.json` for exact public input/output examples.
+厳密な公開入出力例は`tests/fixtures/slack-retire.json`を参照してください。
 
-## Chat menu only
+<a id="chat-menu-only"></a>
+## Chatのメニューだけ
 
-`GET /api/slack-approval-entry` returns `{enabled:false}` or `{enabled:true,url}` from the separate `slack-web.json`. The URL must be HTTPS, the exact private-site Client host, path `/slack/approvals`, with no credentials, query, fragment, escape or redirect. The menu uses a direct no-referrer/noopener link; Server never proxies approvals, cookies, tokens or administrator actions. Existing LAN-shared Chat history is unchanged.
+`GET /api/slack-approval-entry`は別設定`slack-web.json`から`{enabled:false}`または`{enabled:true,url}`を返します。URLはHTTPS、private-siteの厳密Client host、path `/slack/approvals`で、認証情報、query、fragment、escape、redirectを認めません。メニューは直接のno-referrer/noopenerリンクを使い、Serverが承認・cookie・token・管理者操作を代理送信しません。既存のLAN共有Chat履歴は不変です。
 
-Install the Client's HTTPS trust chain using the approved device process, verify its certificate/name, then bookmark the direct HTTPS approval URL on each phone. The current Client page uses administrator password login rather than a browser client certificate; internal Host mTLS is unchanged. Never bypass a certificate error. The legacy HTTP Chat page is a convenience menu, not the approval trust anchor; use the verified HTTPS bookmark for approval.
+承認済み端末手順でClientのHTTPS信頼chainを導入し、証明書／名前を検証して、各携帯端末に直接HTTPS承認URLをbookmarkします。現行Clientページはブラウザークライアント証明書ではなく管理者パスワードログインを使い、内部Host mTLSは不変です。証明書errorを迂回しません。旧HTTP Chatは便利なメニューであり承認の信頼根拠ではないため、承認には検証済みHTTPS bookmarkを使います。
 
-## Validation and deployment boundary
+<a id="validation-and-deployment-boundary"></a>
+## 試験と配備の境界
 
-Run `python -B tests/run_public_tests.py`. This generates a temporary ignored **public fixture** site configuration, refuses an existing real configuration, restricts parent test connections to loopback listeners opened by tests, and removes its own generated configuration. Normal tests use temporary Brain roots and one temporary public HTTP child server. Production settings/keys/models are not copied. TLS Host identity is tested at the HTTP handler with a certificate adapter. The approved installation additionally passed actual Host mTLS/capability and HTTPS password-gate checks, the Chat entry check, bounded public Slack/startup probes and one saved-result text attachment return, as detailed in `SLACK-VALIDATION.md` and the paired Client validation. Broad production throughput, physical mobile approval, real private-proposal adoption, deployed retention/recovery, physical purge across WAL/backups and general end-to-end retry/delivery remain unqualified. The additional retirement-only public fixture suite is `python -B tests/run_public_tests.py test_slack_retire.py`; it does not rerun the prior 109 cases.
+`python -B tests/run_public_tests.py`を実行します。Git対象外の一時的な**公開fixture**環境設定を生成し、実設定があれば拒否し、親試験の接続先を試験作成のループバックlistenerへ限定して、自分の生成設定を削除します。通常試験は一時Brain rootと一時公開HTTP child server1件を使い、本番設定／key／modelはコピーしません。TLS Host identityは証明書adapter付きHTTP handlerで試験します。承認済み導入環境では加えて実Host mTLS／capability、HTTPS password gate、Chat入口、上限付き公開Slack／起動probe、保存結果のtext添付返送1件が成功しており、`SLACK-VALIDATION.md`と対応Client検証で説明します。広範な本番throughput、物理モバイル承認、私有提案実採用、配備後保持／回復、WAL／backupを含む物理消去、一般的なend-to-end再試行／配達は未検証です。追加の退役専用公開試験は`python -B tests/run_public_tests.py test_slack_retire.py`で、以前の109件を再実行するものではありません。
 
-Limited independent read-only reviews of the SSE/startup deltas and fixed approval-entry/application rollout reported no findings. They are not a general security or model-quality guarantee. The implemented scope is ready for review; remaining qualifications are listed in `SLACK-VALIDATION.md`. Each installation still requires its own exact authorization, known source/config preimages, maintenance quiescence, scoped normal restarts and reviewed rollback. Keep public examples disabled; only the local operator selects activation in private configuration. Review or merge never performs deployment, enrollment, model requests or knowledge application.
+SSE／起動差分と固定承認入口／適用展開の限定的な独立読み取りreviewでは指摘なしでしたが、包括的securityやモデル品質の保証ではありません。実装範囲はreview準備済みで、残る検証は`SLACK-VALIDATION.md`に列挙します。各環境には厳密な承認、既知source／config preimage、保守静止確認、範囲限定の通常再起動、review済みrollbackが引き続き必要です。公開例は無効のまま保ち、private設定の有効化はローカル運用者だけが決めます。reviewやmergeでは、配備、登録、モデル要求、知識適用を実行しません。

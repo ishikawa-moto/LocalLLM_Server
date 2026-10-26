@@ -6,6 +6,8 @@ SecondBrainはAgent自身が育てるpersistent knowledge systemです。人間�
 
 ## 配置
 
+現在の保護付き起動・data root・作業領域の分離は[ServerPCのフォルダー構成](docs/ja/FOLDER_LAYOUT.md)を参照してください。以下の保存先は例であり、主力モデルは実設定のmodel_pathを優先します。
+
 - ServerPC: mTLS Control Gateway、llama.cpp/Qwen、CPU embedding、SecondBrain
 - ClientPC: VS Code、Continue、.NET 10 LocalBrain Client Host、Codex拡張
 - `C:\Users\USERNAME\Documents\LocalBrain`: コード、設定、SecondBrain原本
