@@ -1,11 +1,12 @@
-# Site configuration
+<a id="site-configuration"></a>
+# 環境ごとの設定
 
-Copy `site.example.json` to `private-site.json` and replace the example server/client addresses and chat subnet with your deployment values. Every `__NAME__` value is a placeholder, not a connection target. Replace all host/subnet placeholders and use JSON integers for `*_port` values. Loopback placeholders must refer to this machine; retain loopback-only binding for internal APIs and the client bridge. `private-site.json` is local-only and ignored by Git.
+`site.example.json`を`private-site.json`へコピーし、例示のServer／ClientアドレスとChatサブネットを実環境の値へ置き換えます。`__NAME__`形式の値はすべてプレースホルダーで、接続先ではありません。ホスト／サブネットのプレースホルダーをすべて置き換え、`*_port`はJSONの整数にします。ループバックの値はこのPC自身を指す必要があり、内部APIとクライアントBridgeはループバック限定のままにします。`private-site.json`はローカル専用でGitの対象外です。
 
-Existing service configuration (`gateway.json`, `chat.json`, `secondbrain.json`, and `python-runtime.json`) retains precedence for its own settings. Site settings preserve deployment values formerly embedded in source defaults, including the exact trusted client address for human-approved operations.
+既存サービス設定（`gateway.json`、`chat.json`、`secondbrain.json`、`python-runtime.json`）は、それぞれの設定項目について優先されます。環境設定には、以前ソースの既定値へ埋め込まれていた配備値を保存します。人間が承認する操作の信頼対象となる、厳密なクライアントアドレスも含みます。
 
-Private original files use the `private-` prefix and `.original` suffix. They remain local restore assets, never publishable source. A generated encrypted client package receives the configured server address and numeric service ports; a public template uses `__SERVER_HOST__`, which Setup-Client asks for if it is not supplied.
+私有の原本は`private-`プレフィックスと`.original`拡張子を使います。ローカルの復元用資料として保持し、公開ソースにしてはいけません。生成する暗号化クライアントパッケージには設定済みServerアドレスと数値ポートを反映します。公開テンプレートは`__SERVER_HOST__`を使い、値が未指定ならSetup-Clientが入力を求めます。
 
-Deployment-specific compatibility identifiers and installed firewall display names can also be retained in private site settings. Public defaults use ClientPC and ServerPC role names; existing deployment values are retained locally without changing approval contracts or installed firewall rules.
+配備固有の互換性識別子や導入済みFirewall表示名も、私有の環境設定へ保持できます。公開既定値はClientPC／ServerPCという役割名を使い、既存の配備値は承認契約や導入済みFirewallルールを変更せずローカルに保持します。
 
-Service ports have no public numeric defaults. Configure all `*_port` entries before starting LocalBrain. Existing service configuration files and private site ports must agree for services that override their listen port.
+サービスのポートに公開の数値既定値はありません。LocalBrain起動前にすべての`*_port`を設定します。待受ポートを個別指定するサービスでは、既存サービス設定と私有環境設定のポートを一致させてください。

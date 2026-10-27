@@ -1,14 +1,15 @@
-# ClientPC setup
+<a id="clientpc-setup"></a>
+# ClientPCのセットアップ
 
-1. On ServerPC, run `Install-Server-Admin.cmd` once and approve the Windows administrator prompt.
-2. Run `Prepare-Client-Package.cmd` and choose a new 12-character-or-longer PFX password. This writes the encrypted ZIP and `Install-LocalBrain-On-ClientPC.cmd` launcher together. Keep the password separate from the ZIP.
-3. For a temporary ClientPC-only transfer share, run `Create-Temporary-Client-Share.ps1` as administrator. From ClientPC open `\\SERVER_HOST\LocalBrainTransfer`, then run `Install-LocalBrain-On-ClientPC.cmd`. It copies the ZIP locally before extraction, prompts for the PFX password and first Git workspace, installs the client, and verifies the loopback listener.
-4. After installation is verified, run `Remove-Temporary-Client-Share.ps1` as administrator on ServerPC to remove both the share and its TCP SMB_PORT firewall rule.
-5. Restart VS Code and select **LocalBrain Qwen 27B** in Continue Agent mode.
-6. Use Continue for planning and implementation. LOW work uses no Codex, NORMAL work uses one final review, and HIGH work uses an independent plan review and final review.
+1. ServerPCで`Install-Server-Admin.cmd`を1回実行し、Windowsの管理者確認を承認します。
+2. `Prepare-Client-Package.cmd`を実行し、12文字以上の新しいPFXパスワードを指定します。暗号化ZIPと`Install-LocalBrain-On-ClientPC.cmd`起動スクリプトが一緒に生成されます。パスワードはZIPとは別に管理します。
+3. ClientPC限定の一時転送共有が必要なら、管理者として`Create-Temporary-Client-Share.ps1`を実行します。ClientPCで`\\SERVER_HOST\LocalBrainTransfer`を開き、`Install-LocalBrain-On-ClientPC.cmd`を実行します。ZIPをローカルへコピーしてから展開し、PFXパスワードと最初のGit作業場所を入力して、クライアントの導入とループバック待受の確認を行います。
+4. 導入確認後、ServerPCで管理者として`Remove-Temporary-Client-Share.ps1`を実行し、共有とTCP SMB_PORTのFirewallルールを削除します。
+5. VS Codeを再起動し、ContinueのAgentモードで**LocalBrain Qwen 27B**を選びます。
+6. 調査計画・実装はContinueで行います。LOWではCodexを使わず、NORMALでは最終レビュー1回、HIGHでは独立した計画レビューと最終レビューを行います。
 
-The bridge starts at Windows logon. The first Continue request starts the model on ServerPC. After 30 minutes without a model request and with no active or queued job, the model stops. Heartbeat loss never interrupts an active inference. A later request starts the model again without requiring resubmission.
+BridgeはWindowsログオン時に起動します。最初のContinue要求でServerPCのモデルが起動します。30分間モデル要求がなく、実行中・待機中のジョブもないときにモデルを停止します。heartbeatが途絶えても実行中の推論は中断しません。後続要求はモデルを再起動し、要求の再送を必要としません。
 
-SecondBrain read tools are available through the local MCP adapter. Writeback, decision, merge, and supersede tools create proposals only and require user approval. The ServerPC idle librarian grows verified knowledge from `raw` without invoking Codex automatically.
+SecondBrainの読み取りツールはローカルMCPアダプターを通じて利用できます。writeback、decision、merge、supersedeツールは提案を作成するだけで、ユーザー承認が必要です。ServerPCのidle librarianは`raw`から検証済み知識を育て、Codexを自動呼び出ししません。
 
-`SERVER_HOST` is a placeholder for the configured ServerPC hostname or address. Documentation-only example IPs must not be used as the actual connection target.
+`SERVER_HOST`は設定済みServerPCのホスト名またはアドレスを表すプレースホルダーです。説明用の例示IPを実際の接続先として使用しないでください。

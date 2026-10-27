@@ -1,37 +1,41 @@
-# Fixed Gateway release and deployment operations
+<a id="fixed-gateway-release-and-deployment-operations"></a>
+# 固定Gatewayリリースと配備操作
 
-This adds a staged release boundary to the integrated Slack recovery candidate. It does not itself deploy, merge main or start a model.
+統合したSlack回復候補へ段階的release境界を追加します。これ自体で配備、mainマージ、モデル起動は行いません。
 
-## Code versus stable data
+<a id="code-versus-stable-data"></a>
+## コードと安定データの分離
 
-The first managed Gateway release uses:
+最初の管理対象Gateway releaseは次を使用します。
 
-- code: a commit-bound directory under ProgramData/LocalBrainServer/releases
-- verified entry: ProgramData/LocalBrainServer/gateway_entry.py
-- active pointer: ProgramData/LocalBrainServer/gateway-current.json
-- stable data root: the existing local deployment folder, recorded privately in intent.json
+- コード：ProgramData/LocalBrainServer/releases配下のcommit固定ディレクトリ
+- 検証entry：ProgramData/LocalBrainServer/gateway_entry.py
+- 有効pointer：ProgramData/LocalBrainServer/gateway-current.json
+- 安定data root：既存のローカル配備フォルダー。intent.jsonへ非公開で記録
 
-Configuration, TLS credentials, databases, models, llama.cpp dependencies, knowledge and logs remain at the stable data root. They are not copied into code releases or sent to another PC. The release manifest contains Git-tracked product/source/procedure files only. The new ProgramData tree grants Administrators/SYSTEM full control and Users read/execute. Existing data ACLs are not changed.
+設定、TLS認証情報、DB、モデル、llama.cpp依存、知識、ログは安定data rootに残し、コードreleaseへのコピーや他PCへの送信はしません。release manifestはGit追跡済みの製品／source／手順ファイルだけです。新ProgramData treeはAdministrators/SYSTEMにFullControl、UsersにRead/Executeを与え、既存data ACLは変更しません。
 
-The Gateway task keeps its existing SYSTEM principal, executable, working directory, schedule/settings and security descriptor. Only its arguments change to Python isolated mode (-I -B), the verified entry and the fixed local pointer. Registration uses UPDATE, not CREATE_OR_UPDATE. A missing/changed task is held.
+Gateway taskの既存SYSTEM principal、実行ファイル、作業フォルダー、schedule／settings、security descriptorは保持します。変えるのはPython isolated mode（-I -B）、検証entry、固定ローカルpointerを使う引数だけです。登録はUPDATEで、CREATE_OR_UPDATEは使いません。task欠落／変更は保留します。
 
-site_settings separates CODE_ROOT from an optional absolute LOCALBRAIN_DATA_ROOT. Gateway code uses the stable data root for config/state and its frozen CODE_ROOT for Manage-LocalBrain.ps1. Release-owned management uses frozen code for future Brain/Proxy/Gateway child starts, explicit stable Brain --root and the existing stable model/binary paths. No tuning or authentication setting is changed. Reviewer dispatches from future release-owned Brain code use the release wrapper and stable data root.
+site_settingsはCODE_ROOTと、任意の絶対LOCALBRAIN_DATA_ROOTを分離します。Gatewayは設定／状態に安定data root、Manage-LocalBrain.ps1に凍結CODE_ROOTを使います。release所有の管理コードは将来のBrain／Proxy／Gateway child起動にも凍結コードを使い、Brainへ安定--rootを明示し、既存の安定モデル／binary pathを使用します。調整値や認証設定は変えません。将来のrelease所有Brainからのreviewer配信もrelease wrapperと安定data rootを使います。
 
-The existing independently scheduled Chat and Reviewer tasks and running Brain/Proxy/Embedding processes are not retargeted or restarted by this first Gateway switch. Their identities remain protected. They retain their existing startup paths, so main sync can change code used on their next independent launch. This limit is explicit; a later component release switch must record its own tested version and identity. Do not describe the entire installation as already frozen.
+既存の独立Chat／Reviewer定期taskと稼働Brain／Proxy／Embeddingは、この最初のGateway切替では起動先を変えず再起動もしません。identityを保護し、既存起動pathを保持するため、main同期が次回の独立起動で使うコードを変え得ます。この限界を明示し、後続component切替では独自の試験済みversion／identityを記録します。インストール全体が凍結済みと説明してはいけません。
 
-## Preparation only
+<a id="preparation-only"></a>
+## 準備だけの操作
 
-Prepare-GatewayRelease.ps1 defaults to Describe. Explicit Prepare requires a clean exact candidate commit, the prior production file/dependency manifest, classified DB baseline and observed task/listener identities. It verifies them, refuses existing prepared payload/intent or unknown ProgramData content, then stages only into the workspace packet. It does not perform DDL, change tasks, stop processes, write production files or request UAC.
+Prepare-GatewayRelease.ps1の既定はDescribeです。明示Prepareにはcleanで正確な候補commit、以前の本番file／dependency manifest、分類済みDB baseline、観測済みtask／listener identityが必要です。これらを確認し、既存prepared payload／intentや不明ProgramData内容を拒否して、workspace packetだけを準備します。DDL、task変更、process停止、本番書込み、UAC要求は行いません。
 
-The private intent binds source commit/tree, every staged file, Python executable, protected source/config hashes and ACLs, DB identity/ACL metadata and the full typed DB baseline. Prepared assets must not be silently replaced after a partial failure.
+非公開intentにはsource commit／tree、全staged file、Python実体、保護source／config hashとACL、DB identity／ACL metadata、完全な型付きDB baselineを結び付けます。部分失敗後に準備済みassetを黙って置き換えてはいけません。
 
-The snapshot helper and every payload file are read from the exact immutable Git commit blobs. Text payloads retain committed LF bytes; checkout CRLF conversion and later working-tree edits cannot change the staged release. Binary blobs are copied without text conversion. Preparation verifies HEAD and cleanliness again after staging.
+snapshot helperと全payload fileは正確なimmutable Git commit blobから読みます。テキストはcommit済みLF bytesを保持し、checkoutのCRLF変換や後の作業tree編集でstaged releaseを変えません。binaryはtext変換なしでコピーします。準備後にもHEADとcleanを再検証します。
 
-## Database boundary
+<a id="database-boundary"></a>
+## DBの境界
 
-release_db.py snapshots all SQLite tables, including sqlite_sequence and any shadow tables, using typed cell encoding and sorted row hashes. It records schema, user_version and integrity inside one read-only transaction per DB. The five DB snapshots are independent; this is not an atomic cross-database checkpoint.
+release_db.pyは型付きcell符号化と整列した行hashで、sqlite_sequenceやshadow tableを含む全SQLite表をsnapshot化します。DBごとに1つの読み取りtransaction内でschema、user_version、整合性を記録します。5DBのsnapshotは独立しており、DB横断atomic checkpointではありません。
 
-Only the restricted store receives additive DDL:
+追加DDLの対象は制限付きストアだけです。
 
     CREATE TABLE retry_links(
         previous_id TEXT PRIMARY KEY,
@@ -40,44 +44,48 @@ Only the restricted store receives additive DDL:
         attempt_index INTEGER NOT NULL
     )
 
-The primary/unique constraints create the two implicit indexes. Existing table rows and user_version must remain unchanged. An existing retry table is accepted only for the exact known DDL, columns, two nonpartial implicit unique indexes and absence of triggers/FKs/unknown objects. Unexpected schema, busy/unknown state or unclassified baseline drift holds the operation. Full DB v2 evidence permits only the fixed index-search-counters-v1 predicate described in METRICS-DEPLOYMENT-CONTRACT.md: all business rows stay exact, the complete known metrics profile is bound to its full typed digest, and only the original-baseline cumulative search pair may increase within 32. All other changes HOLD. Passing checks never refresh the baseline. No general DB initialization or history reclassification is part of migration.
+primary／unique制約で暗黙index2件が作られます。既存表の行とuser_versionは不変が必須です。既存retry表は既知の厳密DDL・列・非partial暗黙unique index2件と、trigger／FK／不明objectなしの場合だけ受理します。想定外schema、busy／未知状態、未分類baseline差は保留です。完全なDB v2証拠が許すのはMETRICS-DEPLOYMENT-CONTRACT.mdの固定index-search-counters-v1だけで、全業務行は厳密一致、既知の全metrics profileを全型付きdigestへ結び付け、元baselineから累積32以内の検索ペア増加だけを認めます。他の全変化はHOLDで、検査成功でもbaselineは更新しません。移行に汎用DB初期化や履歴の再分類は含みません。
 
-A failure before SQLite commit rolls back only that uncommitted transaction. After commit, later failure preserves the additive schema and current state; no backup DB or historical runtime is restored.
+SQLite commit前の失敗は、その未commit transactionだけをrollbackします。commit後の後続失敗は追加schemaと現状を保持し、backup DBや過去runtimeへ復元しません。
 
-## Parent coordination and native Windows boundary
+<a id="parent-coordination-and-native-windows-boundary"></a>
+## 親との調整と正規Windows操作の境界
 
-Apply-GatewayRelease.ps1 defaults to Describe; Inspect is read-only. Apply requires the exact intent hash, a fresh hash-bound apply-go.json stating ClientMaintenanceConfirmedApplyGO, zero Client active/pending requests, no new requests until completion and the parent message reference. Its 15-minute operation window starts from that GO record. This gate is workflow coordination under existing human authorization.
+Apply-GatewayRelease.ps1の既定はDescribe、Inspectは読み取り専用です。Applyには正確なintent hashと、新しいhash固定apply-go.jsonが必要で、ClientMaintenanceConfirmedApplyGO、Client active／pending0、新規要求停止、親message参照を含めます。15分の操作窓はGO記録の作成から始まります。既存の人間承認に基づく工程調整のguardです。
 
-No GO record is generated during preparation. Parent sends the actual GO after observing the final hashes. Native Windows UAC must then be requested once through the legitimate consent prompt; this procedure neither clicks nor bypasses it. Normal sandbox escalation is not a substitute for that consent.
+準備中にGOは生成しません。最終hash観測後に親が実GOを送ります。その後、正規consent promptでnative Windows UACを1回要求し、手順はクリックも迂回もしません。通常の実行権限拡張はWindowsの承認の代わりにはなりません。
 
-The elevated operation first reads the live SYSTEM image/command line and scheduler parent and matches them to the fixed task/GUID/PID/birth binding. It fails before stop if those remain unknown. Config/dependencies/source hashes, file ownership, full DB snapshots with the strict classified search-pair predicate, current idle and protected service identities are rechecked. No separate read-only UAC is needed when the same bounded Apply preflight can establish the image identity.
+昇格後はまず実SYSTEM image／command lineとScheduler親を読み、固定task／GUID／PID／birthへ一致させます。不明なら停止前に失敗します。設定／依存／source hash、file所有権、厳密分類検索ペア付き全DB snapshot、現在idle、保護サービスidentityを再照合します。同じ上限付きApply事前検査でimageを確認できるなら、別の読み取りUACは不要です。
 
-## Apply sequence and failure handling
+<a id="apply-sequence-and-failure-handling"></a>
+## Applyの順序と失敗処理
 
-1. Acquire the single-operation mutex and refuse any existing/pending execution receipt.
-2. Verify GO, fixed assets, old task/image identity, source/config/DB baselines and idle/base services. Save the receipt durably.
-3. Install and verify the new code-only ProgramData release and permissions while the old Gateway still runs.
-4. Save stop intent; stop only the exact owned Gateway instance. Wait for Ready, zero instances and zero listener. Never kill an unknown process.
-5. Recheck all five DBs. Run the single additive restricted migration and verify every previous business row/table and classify the bounded original-baseline search counters in full retained evidence.
-6. Update only the known Gateway task action, preserving its security/settings/principal. Save the new task definition binding.
-7. Before one Run, verify Brain health, Proxy listener, protected identities and post-migration DB baseline again.
-8. Save the Run attempt before calling it, then durably save its returned instance GUID before observing PID/birth/health. Bind a new identity once; never adopt a replacement or retry Run.
-9. GET status must report the exact release commit and idle/base health. Check DB/config/source/other service identities again and save SERVER_DEPLOYED_AWAITING_CLIENT_HOST_QUALIFICATION.
+1. 単一操作mutexを取得し、既存／pending execution receiptを拒否します。
+2. GO、固定asset、旧task／image identity、source／config／DB baseline、idle／基盤サービスを検証し、receiptを永続保存します。
+3. 旧Gateway稼働中に、新しいコード専用ProgramData releaseと権限を導入・検証します。
+4. 停止intentを保存し、厳密に所有するGateway instanceだけを停止します。Ready、instance0、listener0を待ち、不明processをkillしません。
+5. 全5DBを再検査し、制限付き専用の追加移行を1回実行します。以前の全業務行／表を検証し、元baselineから上限付き検索カウンター差を全証拠に分類します。
+6. security／settings／principalを保持して、既知Gateway task actionだけを更新し、新定義bindingを保存します。
+7. Run1回の前にBrain health、Proxy listener、保護identity、移行後DB baselineを再確認します。
+8. Run試行を先に保存し、返却instance GUIDをPID／birth／health観測前に永続化します。新identityの採用は1回だけで、置換processを採用したりRunを再試行したりしません。
+9. GET statusで正確なrelease commitとidle／基盤healthを要求します。DB／config／source／他サービスidentityを再確認し、SERVER_DEPLOYED_AWAITING_CLIENT_HOST_QUALIFICATIONを保存します。
 
-Busy, unknown ownership, hash/schema drift, startup/health failure or incomplete receipt produces HOLD and preserves current state. The Gateway may remain stopped. There is no automatic old-runtime/config/DB restoration and no second start. This script sends no inference, Slack post, original request or Host-authentication bypass.
+busy、不明所有権、hash／schema差分、起動／health失敗、不完全receiptはHOLDとなり現状を保持します。Gatewayは停止したままの場合があります。旧runtime／設定／DBの自動復元や2回目の起動はありません。このscriptは推論、Slack投稿、元要求、Host認証迂回を送信しません。
 
-## Git/main synchronization and cleanup
+<a id="gitmain-synchronization-and-cleanup"></a>
+## Git／main同期と整理
 
-Git checkout, staged payload, installed release and running process are different states. A pull changes checkout; it does not promote the pointer or attest the running release. Deployment receipt and status release_commit identify the running version.
+Git checkout、staged payload、installed release、running processは別の状態です。pullが変えるのはcheckoutであり、pointerの昇格や稼働releaseの証明ではありません。配備receiptとstatusのrelease_commitが稼働版を示します。
 
-Parent owns GitHub main merge. The Server owner waits for the exact merge SHA before local main sync. Verify that the known four-file production diff still equals its preserved public patch and is included in the integrated candidate; if unknown changes exist, hold. Only then consume that exact known patch with a checked reverse application and perform a normal fast-forward to the parent-supplied merge SHA. Do not reset, force-push or discard unknown changes. Record merge SHA alongside the installed source commit/tree.
+GitHub mainマージは親が所有し、Server側所有者は正確なmerge SHAを受け取ってからローカルmainを同期します。既知の本番4ファイル差分が保存済み公開patchと一致し、統合候補に含まれることを確認し、未知差分があれば保留します。その後だけ、検査済みの逆patch適用でその正確な既知差分を解消し、親指定merge SHAへ通常のfast-forwardを行います。reset、force-push、未知差分の破棄はせず、installed source commit／treeと並べてmerge SHAを記録します。
 
-After the new configuration and required functions have been qualified, remove only identified unused fixtures/old releases/worktrees/backups. Keep the active release/pointer, stable data/models/auth/dependencies, required tasks, final receipt and reproducible Git source/procedure. Cleanup is not performed during PREPARED and must not delete working code or a still-needed component startup path.
+新設定と必要機能の検証後、未使用と特定したfixture／旧release／worktree／backupだけを削除します。有効release／pointer、安定data／models／auth／dependencies、必要task、最終receipt、再現可能なGit source／手順を保持します。PREPARED中は整理せず、稼働コードやまだ必要なcomponent起動pathを削除しません。
 
-## Qualification limits
+<a id="qualification-limits"></a>
+## 検証の限界
 
-Public regression/stub guards validate logic, metadata, state transitions and additive migration on disposable fixtures. Native SYSTEM image access, ACL application/task action update, actual Windows switch, Client Host-authenticated capabilities and limited real model qualification remain separate execution steps. Maintain Qwen context32768/KVq4 and the existing Host-only TLS/restriction/foreground-priority contracts.
+公開回帰／stub guardは使い捨てfixtureで論理、metadata、状態遷移、追加移行を検証します。native SYSTEM imageアクセス、ACL適用／task action更新、実Windows切替、Client Host認証capabilities、限定実モデル検証は別の実行工程です。Qwenのcontext32768／KVq4と既存Host限定TLS／restriction／foreground優先契約を維持します。
 
-For the new fixed release maintenance operation, follow RELEASE-MAINTENANCE-FENCE.md. UAC wait and all Scheduler operations remain outside the knowledge byte lock. Both existing producer protocols and a single explicit full-evidence adoption are required; no implicit baseline refresh is permitted.
+新しい固定release保守操作ではRELEASE-MAINTENANCE-FENCE.mdに従います。UAC待ちと全Scheduler操作はknowledge byte lockの外です。既存producer protocol双方と、全証拠付きの明示採用1回が必要で、暗黙baseline更新は禁止です。
 
-After a committed migration and task-registration verification hold, follow FORWARD-GATEWAY-START.md. Never rerun Apply or infer that TaskUpdated=false means registration did not occur. The separately reviewed operation starts the already updated task once and repeats no adoption or migration.
+移行commit後のtask登録確認で保留した場合はFORWARD-GATEWAY-START.mdに従います。Applyを再実行したり、TaskUpdated=falseから未登録と推定したりしません。別途レビューした操作で更新済みtaskを1回起動し、採用・移行は繰り返しません。

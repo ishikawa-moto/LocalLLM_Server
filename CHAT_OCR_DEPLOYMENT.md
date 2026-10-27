@@ -1,100 +1,39 @@
-# Chat OCR forward activation
+<a id="chat-ocr-forward-activation"></a>
+# Chat OCRの前進有効化
 
-The candidate is not a production-readiness receipt. A separate, exact Apply
-intent and fresh human maintenance approval are required before production work.
-The default Apply mode describes the operation. Validate verifies staged public
-artifacts and runtime hashes; it opens no production database and makes no request.
-Apply does not elevate itself.
+この候補は本番準備完了のreceiptではありません。本番作業には、別途固定した厳密なApply intentと、新しい人間の保守承認が必要です。Applyの既定モードは操作説明だけです。Validateは作業領域の公開artifactとruntime hashを検証し、本番DBを開かず、要求も送りません。Apply自身は昇格しません。
 
-## Stable history and configuration
+<a id="stable-history-and-configuration"></a>
+## 安定した履歴と設定
 
-Code and Web assets are loaded from one immutable, manifest-verified release.
-Both SYSTEM tasks use the protected `chat_ocr_entry.py`, a fixed spec hash, and an
-explicit role. Chat receives the same explicit data root through its environment
-and `--root`. Site defaults, TLS and existing Chat/Gateway/Slack configuration
-come from that data root. Private configuration is never copied into the release.
+コードとWeb assetは、manifest検証済みの単一immutable releaseから読み込みます。両SYSTEMタスクは保護された`chat_ocr_entry.py`、固定spec hash、明示roleを使用します。Chatには環境変数と`--root`で同じ明示data rootを渡します。環境の既定値、TLS、既存Chat／Gateway／Slack設定はそのdata rootから読み、私有設定をreleaseへコピーしません。
 
-The existing Chat database retains its path and file identity. Gateway jobs and
-Slack restricted storage are also existing-only. Every connection checks identity
-and uses SQLite `mode=ro` while held, `mode=rw` after activation, or always `ro`
-for read-only telemetry and OCR conversation checks. The deployment path never
-uses `rwc`, initializes existing tables, changes their journal mode, repairs their
-schema, adopts a new baseline, restores an old DB, or creates another history.
+既存Chat DBのパスとfile identityを保持します。Gateway jobsとSlack制限付きストアも既存ファイルだけを使用します。各接続でidentityを確認し、保留中はSQLite `mode=ro`、有効化後は`mode=rw`、読み取り専用telemetryとOCR会話照会は常に`ro`を使います。配備経路は`rwc`を使わず、既存表の初期化、journal mode変更、schema修復、新しいbaseline採用、旧DB復元、別履歴作成を行いません。
 
-Startup validates column types, nullability, defaults, primary keys, unique-index
-properties and required indexes against reference DDL executed only in memory.
-Missing/incompatible schema or an unexpected trigger causes a hold. Before/after
-checks compare existing DB identities, schema-catalog hashes, main-file bytes and
-any nonempty WAL. SQLite may allocate SHM or an empty WAL during a read-only
-connection; those are not described as history changes. Live WAL is never hidden
-using SQLite `immutable=1`.
+起動時にはメモリー内だけで実行した参照DDLと、列型・NULL許可・既定値・主キー・unique index特性・必須indexを照合します。schema欠落／非互換や想定外triggerは保留します。前後比較では既存DB identity、schema catalog hash、main bytes、非空WALを照合します。読み取り接続でもSHMや空WALが割り当てられ得ますが、履歴変更とは表現しません。SQLite `immutable=1`で稼働WALを隠すこともしません。
 
-Only the new OCR feature configuration, mailbox database and its generated spool
-are new data. Existing authentication, model settings, Slack policy, private keys,
-source checkout and knowledge storage are outside the mutation targets. Base
-process/listener identities and protected-file hashes/ACLs must remain unchanged.
+新規データはOCR機能設定、mailbox DB、その生成spoolだけです。既存認証、モデル設定、Slack方針、秘密鍵、source checkout、知識ストアは変更対象外です。基盤process／listener identityと保護ファイルのhash／ACLを不変に保ちます。
 
-## Single forward attempt
+<a id="single-forward-attempt"></a>
+## 1回だけの前進試行
 
-The future Apply performs this sequence, without automatic script retry:
+後続のApplyは、スクリプトによる自動再試行なしで次の順序を実行します。
 
-1. Verify the exact approved intent, all source/helper/runtime bytes, protected
-   files, complete task definitions and SDDL, old PID/birth/command bindings,
-   target absence and a fresh maintenance GO bound to both Server and Client.
-   All Chat/Slack/Continue users must have confirmed idle and no new requests.
-2. Acquire the existing Librarian barrier protocol and take fresh authenticated
-   idle snapshots. Snapshots are counts only; the old services do not have a
-   global admission fence. Unknown or busy state prevents progress.
-3. Temporarily disable automatic starts of the fixed pair, then normally stop
-   Chat and Gateway once each. No force kill or stale-lock deletion occurs.
-   Disabled tasks must have no instance/process/listener before continuing.
-4. Verify the existing storage, install new Admin/SYSTEM-protected release/spec/
-   entry directories, and update only the task actions while both are disabled.
-   Task XML and SDDL must match the complete predicted Scheduler-normalized
-   definitions. Registration ignores registration triggers and preserves ACEs.
-5. Create the new enabled OCR configuration, restore Enabled for the verified new
-   entries, and request Gateway then Chat startup once each. Only boot triggers
-   or no triggers are accepted. Original Scheduler retry settings are retained;
-   the script does not issue a second Stop/Run. Any later Scheduler start must
-   pass the same immutable entry/spec/database guards.
-6. Both new services initially refuse ordinary requests. Existing authentication
-   remains first. Only metadata health and the pinned mTLS readiness check are
-   available. Chat worker, OCR maintenance and idle control wait for activation;
-   startup never automatically starts base/model processes. First activation
-   passively reconciles an already-running model for normal Slack admission.
-7. Recheck held process/endpoint bindings, existing storage and protected state.
-   Publish the durable, protected, release/spec/manifest/root/DB-bound activation
-   GO atomically as the final production commit point. Future legitimate starts
-   can reuse that approval without binding it to an obsolete PID or DB contents.
+1. 承認された正確なintent、全source／helper／runtime bytes、保護ファイル、全task定義とSDDL、旧PID／birth／command binding、対象の未作成、新しいServer／Client双方へ結び付く保守GOを確認します。すべてのChat／Slack／Continue利用者がidleと新規要求停止を確認していることが必要です。
+2. 既存Librarian barrierを取得し、新しい認証済みidle snapshotを採取します。snapshotは件数だけであり、旧サービスには全体の受付フェンスがありません。未知・busyなら進みません。
+3. 固定した2タスクの自動起動を一時無効化し、Chat→Gatewayを各1回通常停止します。強制終了や古いlock削除はしません。無効化タスクにinstance／process／listenerがないことを確認して進みます。
+4. 既存ストレージを検証し、新しいAdmin/SYSTEM保護のrelease／spec／entry領域を作成します。両タスク無効中にactionだけを更新し、Task XMLとSDDLを予測済みScheduler正規化後の全定義に一致させます。登録triggerは無視し、ACEを保持します。
+5. 新しい有効OCR設定を作り、検証済み新entryのEnabledを戻し、Gateway→Chatを各1回起動します。boot triggerかtriggerなしだけを認めます。既存Scheduler再試行設定を保持し、スクリプトは2回目のStop/Runをしません。後のScheduler起動にも同じimmutable entry／spec／DBガードを適用します。
+6. 新サービスは当初、通常要求を拒否します。既存認証が最優先で、metadata healthとpin固定mTLS readinessだけを許可します。Chat worker、OCR保守、idle制御は有効化を待ち、起動だけで基盤／モデルを自動起動しません。最初の有効化時、既に動くモデルの状態を受動的に再照合して通常Slack受付に反映します。
+7. HELD process／endpoint binding、既存ストレージ、保護状態を再検査します。release／spec／manifest／root／DBへ固定した永続的・保護されたactivation GOを最後の本番確定点としてatomicに公開します。将来の正規起動は、古いPIDやDB内容へ固定せず、この承認を利用できます。
 
-Receipts are written only in a new protected attempt directory, never through a
-user-writable packet temporary file. Python helpers execute the exact hash-checked
-bytes. No model generation, OCR job dispatch, private image, external AI request,
-database migration or old-version restore forms part of Apply.
+receiptは新しい保護attempt領域だけへ書き、ユーザーが書き換えられるpacketの一時ファイルを経由しません。Python helperはhash検証した正確なbytesを実行します。モデル生成、OCR job配信、私有画像、外部AI要求、DB移行、旧版復元はApplyに含みません。
 
-Before activation, failure retains evidence and requires a new forward repair.
-It does not restore old code/DBs or silently retry. A failure during the old-task
-transition may leave an old service running: the receipt explicitly says its
-admission state is unconfirmed. It claims both new services are held only after
-both new bindings were observed. An atomic GO already committed is reported as
-committed even if a subsequent receipt write fails.
+有効化前に失敗したら証拠を保持し、新しい前進修正を必要とします。旧コード／DB復元や黙った再試行はしません。旧タスク移行中の失敗では旧サービスが稼働し続ける場合があるため、receiptは受付状態を未確認と明記します。両方の新bindingを観測して初めて両新サービスがHELDと主張します。atomic GO確定後のreceipt保存が失敗しても、確定済みと報告します。
 
-## Readiness and verification limits
+<a id="readiness-and-verification-limits"></a>
+## Readinessと検証の限界
 
-`GET /v1/chat-ocr/readiness` uses the existing mTLS listener, actual socket peer,
-existing role certificate pin, and the existing Host owner header
-`X-LocalBrain-Approval-Owner` for the worker. It returns NOT_READY before activation.
-After the protected activation checks and authentication of the current socket,
-it returns `CHAT_OCR_SERVER_READY`, the exact source, existing-history-preserved
-flag, authenticated-endpoint flag, UTC verification time and a scope description.
-Apply checks the real loopback mTLS health/readiness path. A ClientPC receipt must
-come from a real ClientPC request; it is not manufactured from a local fixture.
-This readiness metadata does not claim a real OCR image or Qwen generation test.
+`GET /v1/chat-ocr/readiness`は、既存mTLS listener、実socket peer、既存role証明書pin、およびworker用の既存Host ownerヘッダー`X-LocalBrain-Approval-Owner`を使用します。有効化前はNOT_READYを返します。保護付き有効化検査と現在socketの認証後は、`CHAT_OCR_SERVER_READY`、正確なsource、既存履歴保持フラグ、認証済みendpointフラグ、UTC検証時刻、検証範囲を返します。Applyは実ループバックmTLSのhealth／readinessを検査します。ClientPCのreceiptは実ClientPC要求から得る必要があり、ローカルfixtureから作りません。このmetadataは実画像OCRやQwen生成の試験を意味しません。
 
-Public tests cover held admission, shared-history preservation, wrong/missing DB,
-WAL visibility, schema/unique constraints, malformed or stale GO, manifest/entry
-tampering, fresh-interpreter artifact verification and gate reconstruction.
-The Scheduler fixture uses real in-memory definition canonicalization and mocked
-registered-task/folder methods. It obtains/registers no real task. Actual SYSTEM
-registration, service restart, cross-machine mTLS and private OCR remain future
-production validation; no preparation report should claim they already passed.
+公開試験はHELD受付、共有履歴保持、誤DB／欠落DB、WAL可視性、schema／unique制約、不正／古いGO、manifest／entry改変、新しいinterpreterによるartifact検証、gate再構築を扱います。Scheduler fixtureは実メモリー内定義の正規化とmockの登録task／folderメソッドを使用し、実タスクを取得・登録しません。実SYSTEM登録、サービス再起動、PC間mTLS、私有OCRは後続の本番検証であり、準備報告で成功済みと主張してはいけません。

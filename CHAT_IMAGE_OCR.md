@@ -1,42 +1,46 @@
-# Browser Chat OCR (isolated candidate)
+<a id="browser-chat-ocr-isolated-candidate"></a>
+# ブラウザーChat OCR（隔離候補）
 
-Production is unchanged. This candidate targets Server main `dbe7343` and Client PR15 commit `c587a92a1649b1a610723ebcecca93b033bfd4a2`.
+本番は変更していません。この候補の対象はServer main `dbe7343`とClient PR15のコミット`c587a92a1649b1a610723ebcecca93b033bfd4a2`です。
 
-## Audited authentication boundary
+<a id="audited-authentication-boundary"></a>
+## 監査した認証境界
 
-The Server Chat client certificate and the existing pinned Client Host certificate have the same DER fingerprint. Certificate-only role separation is therefore unavailable. The agreed boundary combines the actual TLS peer certificate with the socket peer IP: intake/status/cancel/download require loopback and the existing local certificate pin; worker methods require the configured Client IP, existing Host pin and owner. Forwarded headers and body origin assertions confer no role. A program already able to use the local private key on Server is inside this local OS trust boundary. This does not isolate local programs from one another. No new certificate, CA, port or secret is introduced.
+Server Chatのクライアント証明書と、既存のpin固定されたClient Host証明書は同じDERフィンガープリントです。そのため証明書だけでは役割を分離できません。実TLSピア証明書とsocketの接続元IPを組み合わせる境界を採用します。受付・状態照会・取消・ダウンロードはループバックと既存ローカル証明書pinを要求し、workerメソッドは設定済みClient IP、既存Host pin、ownerを要求します。転送ヘッダーや本文のorigin主張は役割を与えません。Serverのローカル秘密鍵を利用できるプログラムは、このローカルOS信頼境界の内側です。ローカルプログラム間を隔離するものではなく、新しい証明書・CA・ポート・秘密情報も導入しません。
 
-The live Gateway pointer names immutable release `dcc046a`; the production Git checkout is clean at `dbe7343`. A Python listener exists on the configured Chat port, but its executable/command metadata is unavailable under this audit's privileges. The Chat scheduled task is not visible to this caller. These observations do not qualify the running Chat's source or startup identity; deployment must verify that separately without assuming that the listener proves its source.
+監査時のGateway pointerはimmutable release `dcc046a`を指し、本番Git checkoutは`dbe7343`でcleanでした。設定されたChatポートにはPython listenerがありますが、この監査の権限では実行ファイル／コマンド情報を取得できず、ChatのScheduled Taskも見えません。これらは稼働Chatのソースや起動identityを証明しないため、listenerだけからソースを推定せず、配備時に別途検証します。
 
-## Contract and invariants
+<a id="contract-and-invariants"></a>
+## 契約と不変条件
 
-The authoritative worker contract is Client PR15's `CHAT_IMAGE_OCR.md` and `dotnet/LocalBrain.ClientHost/ChatOcrRelay.cs`. Worker `next` accepts only the poll schema and returns only `job`; a job has exactly schema/job_id/conversation_id/input_sha256/extension/formats/bytes/cancel_requested. Input is at most4MiB; next is at most6MiB. Progress registration must be acknowledged before deleting staged source bytes. An HTTP delivery alone is not registration.
+worker契約の正本はClient PR15の`CHAT_IMAGE_OCR.md`と`dotnet/LocalBrain.ClientHost/ChatOcrRelay.cs`です。workerの`next`はpoll schemaだけを受理し、`job`だけを返します。jobの項目はschema/job_id/conversation_id/input_sha256/extension/formats/bytes/cancel_requestedに厳密に限定します。入力は最大4MiB、next応答は最大6MiBです。作業用の原本bytesを削除する前に、進捗登録のACKが必要です。HTTPで配達しただけでは登録になりません。
 
-Worker reports are at most16MiB, artifacts at most1MiB each. Markdown is required, table JSON is automatic, HTML/CSV require explicit selection. The canonical OCR job ID is the first32hex of SHA256(`chat_` + mailbox job ID); it is not the mailbox job ID. Result source hashes, origin, local-only policy and conversation binding must be revalidated. Paused reports can omit page counts when state is busy; this does not acknowledge registration. Queued/running/paused cycles are valid, while completed-page counts must not regress.
+worker reportは最大16MiB、artifactは各最大1MiBです。Markdownは必須、table JSONは自動、HTML/CSVは明示選択が必要です。canonical OCR Job IDはSHA256（`chat_`＋mailbox Job ID）の先頭32桁の16進数であり、mailbox Job IDそのものではありません。結果のsource hash、origin、ローカル限定方針、会話へのbindingを再検証します。busy状態のpaused reportはページ数を省略できますが、登録ACKにはなりません。queued/running/pausedの循環は有効ですが、完了ページ数の後退は禁止です。
 
-The Server page contract is1..200 result pages and0..200 progress pages, matching the existing Client maximum. A single `chat_ocr.MAX_PAGES` constant controls both validations and the public `/api/ocr/config` capability; the UI displays that capability instead of an independent limit. This corrects the earlier Server-only25-page cap, which rejected a valid26-page registration and caused repeated delivery of the same input. Progress above200 is rejected before registration; invalid terminal results above200 are not published and become the existing `OCR_INVALID_RESULT` failure. Source/response/report/artifact byte limits, registration ACK, cancel/expiry and worker resource/settings are unchanged. A200-page document may still exceed the byte, time or artifact limits;200 pages is not a guarantee of successful OCR completion or model context fit.
+Serverのページ契約は、既存Clientの上限と同じ結果1～200ページ、進捗0～200ページです。単一の`chat_ocr.MAX_PAGES`で両方の検査と公開`/api/ocr/config` capabilityを管理し、UIは独自上限ではなくその値を表示します。以前のServerだけの25ページ制限では有効な26ページ登録を拒否して同じ入力を繰り返し配達していたため、これを修正します。200を超える進捗は登録前に拒否し、200を超える不正な終端結果は公開せず、既存の`OCR_INVALID_RESULT`失敗にします。source/response/report/artifactのbyte上限、登録ACK、取消・期限、worker資源・設定は変更しません。200ページでもbyte・時間・artifact上限を超え得るため、OCR完了やモデル文脈への適合を保証しません。
 
-Requests retain stable IDs and immutable bindings. Terminal report replay must be identical; conflicting reports cannot replace accepted results. Cancellation/expiry/deletion suppress publication even if an older complete report arrives. A cancellation ACK is not proof that the worker has stopped. Outstanding assigned cancellation remains deliverable until worker terminal acknowledgement. Tombstones cannot be reused or evicted to admit an expired ID.
+要求は安定したIDと変更不可bindingを保持します。終端reportの再送は同一内容でなければならず、競合reportで受理済み結果を置き換えません。取消・期限切れ・削除があれば、古いcomplete reportが後着しても公開しません。取消ACKはworker停止の証明ではありません。割当て済みで未完の取消はworker終端ACKまで配達可能に保ちます。tombstoneを再利用したり、期限切れIDを受け入れるため追い出したりしません。
 
-For an already assigned job with the Server-owned cancel flag set, a `cancelling` update may omit page counters, matching the real Client cancellation-wait envelope. It acknowledges waiting only: registration, counters and `worker_done` are unchanged, the assignment remains pending, and only a terminal acknowledgement releases it. Without the Server cancel flag, counterless `cancelling` is rejected. Counterless `queued`/`running`/`expiring`, partial counters, wrong bindings and caller-supplied cancel assertions remain invalid. The existing counterless `paused` state-busy envelope is unchanged.
+割当て済みでServer所有のcancel flagが立つjobの`cancelling`更新は、実Clientの取消待ち形式に合わせてページ数を省略できます。これは待機の確認だけで、登録・カウンター・`worker_done`は変えず、割当てを未完のまま保持し、終端ACKだけが解放します。Serverのcancel flagがなければ、ページ数なしの`cancelling`は拒否します。ページ数なしの`queued`／`running`／`expiring`、片方だけのページ数、誤binding、呼出し側のcancel主張は引き続き不正です。既存のbusy状態を示すページ数なし`paused`形式は変わりません。
 
-OCR-only bypasses the existing generation queue, whose worker can start Qwen. Explicit interpretation uses the existing local Qwen path with actual template token counting and delimited untrusted OCR text. No tools, Internet search, cloud fallback or automatic SecondBrain adoption are added. Shared LAN conversation ownership remains intentional.
+OCRだけの処理は、Qwenを起動し得る既存の生成キューを経由しません。明示的な解釈は、実テンプレートのtoken計数と信頼されないOCR本文の区切りを使い、既存ローカルQwen経路を利用します。ツール、Internet検索、cloud fallback、SecondBrainへの自動採用は追加しません。LAN共有の会話所有権は意図した仕様のままです。
 
-## Configuration and retention
+<a id="configuration-and-retention"></a>
+## 設定と保持
 
-The feature is absent/disabled by default. `config/chat-ocr.example.json` documents the optional ignored `config/chat-ocr.json`; no active configuration is committed or created in production. Enabling it later requires both Server and the qualified Client relay to be deployed together. Existing TLS validation, IP allowlist, Client pin and owner remain in force. Browser requests use the existing LAN/Host/Origin/request-header checks; the trusted Chat intake computes the source hash, so LAN HTTP does not require browser WebCrypto. This does not add browser-to-Server TLS or individual user authentication to the existing shared LAN Chat.
+この機能は既定では未設定／無効です。`config/chat-ocr.example.json`に、Git対象外の任意設定`config/chat-ocr.json`を説明し、有効な設定をコミットしたり本番に作成したりしません。後で有効にする場合はServerと検証済みClient relayを一緒に配備します。既存TLS検証、IP許可リスト、Client pin、ownerを維持します。ブラウザー要求は既存LAN/Host/Origin/要求ヘッダー検査を使い、信頼されるChat受付がsource hashを計算するので、LAN HTTPでブラウザーWebCryptoを必要としません。既存のLAN共有Chatへブラウザー～Server間TLSやユーザー別認証を追加するものではありません。
 
-The separate ignored `runtime/chat-ocr/` spool has8 active/outstanding jobs, a256MiB total file quota and10000 durable metadata/tombstone records. Admission fails closed at those limits. Source/job expiry is2h; outputs expire24h after completion. Requests run expiry checks, and an enabled Gateway runs a60s maintenance sweep. Completed/expired/deleted IDs remain tombstones and cannot be re-admitted. The UI lists the latest64 OCR jobs per conversation; artifacts remain explicitly addressable until expiry. A stopped Gateway cannot perform a sweep; the next start/request applies expiry before returning content.
+独立してGit対象外の`runtime/chat-ocr/` spoolには、稼働／未完job最大8件、総ファイル容量256MiB、永続metadata／tombstone最大10000件の上限があります。到達時は安全側で受付を拒否します。入力・jobの期限は2時間、出力は完了から24時間です。要求時に期限検査を行い、有効なGatewayは60秒ごとに保守走査します。完了／期限切れ／削除IDはtombstoneを残して再受付しません。UIは会話ごとの最新64 OCR jobを表示し、artifactは期限まで明示指定で取得できます。停止中のGatewayは走査できないため、次の起動／要求で内容を返す前に期限を適用します。
 
-Input bytes are files, never SQLite payloads. Source deletion follows committed worker registration or terminal/cancel/expiry; exact report replay can recover a crash between file publication and metadata commit. Only the spool's owned generated input/report names are expired, including orphan staging names. Unknown files are retained and count against quota. Expiry removes application files; it is not a claim of secure physical erasure from storage backups. A bound invalid terminal result becomes a visible `OCR_INVALID_RESULT` failure, without publishing it or repeatedly offering a frozen invalid result. Conversation deletion first removes its OCR output files and preserves tombstones; unsettled workers block deletion.
+入力bytesはファイルとして保持し、SQLite本文に入れません。worker登録のコミットまたは終端／取消／期限を受けて原本を削除し、report公開とmetadataコミットの間のクラッシュは同一report再送で回復できます。期限削除はspool所有の生成済み入力／report名と孤立したstaging名だけを対象にします。不明ファイルは保持して容量に算入します。これはアプリファイルの削除であり、ストレージのバックアップから物理的に安全消去したという主張ではありません。binding済みの不正終端結果は可視の`OCR_INVALID_RESULT`失敗にし、不正結果の公開や反復配達を防ぎます。会話削除は先にOCR出力を削除してtombstoneを保持し、未決着workerがあれば削除を保留します。
 
-OCR-only never calls the generation queue. Explicit analysis uses local Qwen, rejects overflow using actual template/token counts, and uses untrusted JSON-delimited document text with no tools or knowledge adoption. OCR result cards persist separately from text history; a page reload recovers them by the shared conversation ID. Only that ID is stored in browser session storage, never source bytes or OCR text. HTML/CSV downloads remain attachments; result previews use text nodes, never raw HTML.
+OCRだけなら生成キューを呼びません。明示分析はローカルQwenを使い、実テンプレート／token数でoverflowを拒否します。文書本文は信頼されないJSON区切りデータとして扱い、ツールや知識採用を行いません。OCR結果カードはテキスト履歴とは別に永続化し、再読込み時に共有会話IDで復元します。ブラウザーsession storageへ保存するのはそのIDだけで、入力bytesやOCR本文は保存しません。HTML/CSVは添付ダウンロードのままにし、プレビューはraw HTMLではなくtext nodeを使います。
 
-## Qualification and limits
+<a id="qualification-and-limits"></a>
+## 検証と限界
 
-The forward deployment, existing-history protections, startup admission gate and
-remaining production validation boundaries are described in [CHAT_OCR_DEPLOYMENT.md](CHAT_OCR_DEPLOYMENT.md).
+前進配備、既存履歴の保護、起動時受付ガード、残る本番検証範囲は[CHAT_OCR_DEPLOYMENT.md](CHAT_OCR_DEPLOYMENT.md)で説明します。
 
-Public tests cover negative authentication, framing/CSRF, restart/lost ACK/idempotency, monotonic progress, cancellation/expiry, source deletion, report-publication crash recovery, retention/quota, invalid-result failure, artifact hash/format, conversation deletion, OCR-only zero-model and explicit-analysis budgets. The existing public regression suite is also run. An isolated browser fixture qualified PNG selection/upload, paused-state reload, completion, automatic Markdown/table JSON, text-only display of a script-like string and Markdown download. The fixture uses fake OCR/model transports; it does not measure OCR accuracy or performance.
+公開試験は、認証拒否、framing/CSRF、再起動／ACK紛失／冪等性、進捗の単調性、取消／期限、原本削除、report公開時クラッシュ回復、保持／容量、不正結果失敗、artifact hash／形式、会話削除、OCRだけのモデル呼出し0件、明示分析の予算を扱います。既存の公開回帰も実行します。隔離ブラウザーfixtureではPNG選択・upload、paused状態の再読込み、完了、自動Markdown/table JSON、script風文字列のテキスト限定表示、Markdown downloadを検証しました。偽のOCR／モデルtransportを使うため、OCR精度や性能は測定しません。
 
-Real Client/Gateway mTLS interoperability, real OCR/model execution, final deployed Chat source identity and the combined Client/Server rollout remain unqualified. The running shared Chat and Gateway were not switched, stopped or restarted. No private image, OCR text, new credential, production DB migration, live Chat/Slack post or model request was used in this work.
+実Client／GatewayのmTLS相互運用、実OCR／モデル実行、最終配備Chatのsource identity、Client／Server一体の展開は未検証です。稼働中の共有Chat／Gatewayの切替・停止・再起動はしていません。この作業で私有画像、OCR本文、新規認証情報、本番DB移行、実Chat／Slack投稿、モデル要求は使用していません。

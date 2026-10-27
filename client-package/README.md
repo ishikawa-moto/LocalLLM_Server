@@ -19,7 +19,8 @@ Bridgeは`LOOPBACK_HOST:BRIDGE_PORT`だけで待ち受けます。ServerPCとの
 %LOCALAPPDATA%\LocalBrain\app\localbrain.exe register-project C:\path\to\repo
 ```
 
-## Codex Review Runner
+<a id="codex-review-runner"></a>
+## Codexレビュー実行ツール
 
 ```powershell
 localbrain.exe review classify .localbrain\requirement.md
