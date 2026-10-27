@@ -136,6 +136,7 @@ class LifecycleController:
         self.background = None
         self.active_jobs = 0
         self.queued_jobs = 0
+        self.foreground_waiters: list[str] = []
         self.inflight_ids: set[str] = set()
         self.cancelled_ids: set[str] = set()
         self.active_task: dict | None = None
@@ -412,7 +413,7 @@ class LifecycleController:
             if self.queued_jobs >= self.config.max_queue: raise OverflowError("request queue is full")
             try: self._record(request_id, role, "queued", new=True)
             except sqlite3.IntegrityError: raise RuntimeError("duplicate request ID") from None
-            self.inflight_ids.add(request_id); self.queued_jobs += 1; self.last_model_request = self.clock()
+            self.inflight_ids.add(request_id); self.queued_jobs += 1; self.foreground_waiters.append(request_id); self.last_model_request = self.clock()
             # Admission and background cancellation share the same lock. A new
             # low-priority request cannot overtake an admitted foreground request.
             background = self.background
@@ -430,12 +431,17 @@ class LifecycleController:
                 remaining = deadline - self.clock()
                 if remaining <= 0:
                     terminal = "timed_out"; raise TimeoutError("queue wait timed out")
-                acquired = self.inference.acquire(timeout=min(.2, remaining))
+                with self.condition:
+                    if self.foreground_waiters[0] == request_id:
+                        acquired = self.inference.acquire(blocking=False)
+                    if not acquired:
+                        self.condition.wait(timeout=min(.2, remaining))
             if not self.health(site_port('llm')) and not self.ensure_ready(): raise ConnectionError(self.last_error or "model failed to restart")
             with self.condition:
                 if request_id in self.cancelled_ids:
                     terminal = "cancelled"; raise InterruptedError("request cancelled")
                 self._record(request_id, role, "active")
+                self.foreground_waiters.remove(request_id)
                 self.queued_jobs -= 1; self.active_jobs += 1; self.state = ModelState.BUSY; self.last_model_request = self.clock()
                 self.active_task = {"request_id": request_id, "role": role, "task_id": (metadata or {}).get("task_id")}
                 active_started = True
@@ -450,13 +456,17 @@ class LifecycleController:
                         self.active_jobs -= 1; self.last_model_request = self.clock()
                         self.active_task = None
                         if self.state != ModelState.FAILED: self.state = ModelState.READY if self.health(site_port('llm')) else ModelState.STOPPED
-                    else: self.queued_jobs = max(0, self.queued_jobs - 1)
+                    else:
+                        self.queued_jobs = max(0, self.queued_jobs - 1)
+                        if request_id in self.foreground_waiters: self.foreground_waiters.remove(request_id)
                     self.inflight_ids.discard(request_id); self.cancelled_ids.discard(request_id)
                     self.active_connections.pop(request_id, None)
                     self._record(request_id, role, terminal)
                     self.condition.notify_all()
             finally:
-                if acquired: self.inference.release()
+                if acquired:
+                    self.inference.release()
+                    with self.condition: self.condition.notify_all()
             if active_started: self.audit("request_finished", request_id=request_id)
 
     @contextlib.contextmanager

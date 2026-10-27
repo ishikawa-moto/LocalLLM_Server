@@ -137,6 +137,27 @@ class GatewayLifecycleTests(unittest.TestCase):
             with c.job("critic-job-0002", role="critic"): pass
         release.set(); one.join(2)
 
+    def test_foreground_waiters_follow_admission_order_after_cold_start(self):
+        runtime = Runtime(delayed=True); c = controller(runtime, start_timeout=2)
+        entered = []; errors = []
+        def work(request_id):
+            try:
+                with c.job(request_id): entered.append(request_id)
+            except Exception as exc: errors.append(exc)
+        threads = []
+        for index in range(3):
+            thread = threading.Thread(target=work, args=(f"request-000{index}",))
+            threads.append(thread); thread.start()
+            deadline = time.monotonic() + 1
+            while c.snapshot()["queued_jobs"] < index + 1 and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertEqual(c.snapshot()["queued_jobs"], index + 1)
+        runtime.release.set()
+        for thread in threads: thread.join(3)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertFalse(errors)
+        self.assertEqual(entered, ["request-0000", "request-0001", "request-0002"])
+
     def test_cancel_active_request_closes_upstream_connection(self):
         runtime = Runtime(); runtime.running = True
         c = controller(runtime)
