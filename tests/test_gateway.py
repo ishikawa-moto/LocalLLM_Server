@@ -158,6 +158,48 @@ class GatewayLifecycleTests(unittest.TestCase):
         self.assertFalse(errors)
         self.assertEqual(entered, ["request-0000", "request-0001", "request-0002"])
 
+    def test_foreground_waits_for_running_restricted_inference(self):
+        runtime = Runtime(); runtime.running = True
+        c = controller(runtime); entered = threading.Event(); finished = threading.Event()
+        def foreground():
+            with c.job('request-wait-0001'):
+                entered.set()
+            finished.set()
+        with c.background_job(4) as lease:
+            thread = threading.Thread(target=foreground); thread.start()
+            deadline = time.monotonic() + 1
+            while c.snapshot()['queued_jobs'] != 1 and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertEqual(c.snapshot()['queued_jobs'], 1)
+            self.assertFalse(entered.is_set())
+            lease.check()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(finished.is_set())
+
+    def test_pending_priorities_are_fifo_and_do_not_preempt_active_job(self):
+        runtime = Runtime(); runtime.running = True
+        c = controller(runtime); entered = []; running = threading.Event(); release = threading.Event()
+        def work(request_id, priority, hold=False):
+            with c.job(request_id, priority=priority):
+                entered.append(request_id)
+                if hold: running.set(); release.wait(3)
+        active = threading.Thread(target=work, args=('active-request', 2, True))
+        active.start(); self.assertTrue(running.wait(1))
+        pending = []
+        for index, priority in enumerate((2, 1, 0, 0)):
+            thread = threading.Thread(target=work, args=(f'waiting-{index:04}', priority))
+            pending.append(thread); thread.start()
+            deadline = time.monotonic() + 1
+            while c.snapshot()['queued_jobs'] < index + 1 and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertEqual(c.snapshot()['queued_jobs'], index + 1)
+        self.assertEqual(entered, ['active-request'])
+        release.set(); active.join(3)
+        for thread in pending: thread.join(3)
+        self.assertFalse(any(t.is_alive() for t in pending))
+        self.assertEqual(entered, ['active-request', 'waiting-0002', 'waiting-0003', 'waiting-0001', 'waiting-0000'])
+
     def test_cancel_active_request_closes_upstream_connection(self):
         runtime = Runtime(); runtime.running = True
         c = controller(runtime)

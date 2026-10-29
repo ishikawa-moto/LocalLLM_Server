@@ -206,24 +206,23 @@ class PriorityTests(unittest.TestCase):
         c=controller(False)
         with self.assertRaises(Deferred):
             with c.background_job(4):self.fail('admitted cold')
-    def test_chat_preempts_review_then_defers_until_release(self):
+    def test_chat_defers_without_preempting_running_review(self):
         c=controller()
         with c.background_job(5) as lease:
             with self.assertRaises(Deferred):
                 with c.background_job(4):pass
-            self.assertTrue(lease.cancelled.is_set())
-            # Expected cancellation is propagated on scope exit.
-            lease.cancelled.clear()
+            self.assertFalse(lease.cancelled.is_set())
         with c.background_job(4):pass
-    def test_high_request_blocks_new_background_and_preempts_existing(self):
-        c=controller();started=threading.Event();errors=[]
+    def test_high_request_blocks_new_background_and_waits_for_existing(self):
+        c=controller();started=threading.Event();release=threading.Event();errors=[]
         def low():
             try:
                 with c.background_job(5) as lease:
-                    started.set();lease.cancelled.wait(2);lease.check()
+                    started.set();release.wait(2);lease.check()
             except InterruptedError:pass
             except Exception as e:errors.append(e)
         thread=threading.Thread(target=low);thread.start();self.assertTrue(started.wait(1))
+        threading.Timer(.1,release.set).start()
         with c.job('normal_fixture_0001'):
             with self.assertRaises(Deferred):
                 with c.background_job(4):pass
@@ -243,31 +242,33 @@ class PriorityTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):conn.connect()
 
 class TransportTests(unittest.TestCase):
-    def test_preemption_interrupts_blocked_stream_and_releases_shared_slot(self):
-        started=threading.Event();disconnected=threading.Event()
+    def test_foreground_waits_for_restricted_stream_completion(self):
+        started=threading.Event();release=threading.Event()
         class Origin(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
             def do_POST(self):
                 self.rfile.read(int(self.headers['Content-Length']))
                 self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
                 self.wfile.write(b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');self.wfile.flush();started.set()
-                self.connection.settimeout(3)
-                try:
-                    if self.connection.recv(1)==b'':disconnected.set()
-                except OSError:disconnected.set()
+                release.wait(3)
+                self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
         server=ThreadingHTTPServer((LOOPBACK,0),Origin);server.daemon_threads=True
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         with tempfile.TemporaryDirectory() as td:
             c=controller();s=SlackService(Path(td),c,LoopbackModel(LOOPBACK,server.server_port,lambda:'public-fixture-key'),LOOPBACK,'host',dict(enabled=True))
             results=[];low=threading.Thread(target=lambda:results.append(s.dispatch('/v1/slack/chat',request())))
             try:
-                low.start();self.assertTrue(started.wait(2));begin=time.monotonic()
-                with c.job('foreground_fixture_01'):pass
-                low.join(2);self.assertFalse(low.is_alive());self.assertLess(time.monotonic()-begin,2)
+                low.start();self.assertTrue(started.wait(2));entered=threading.Event()
+                def foreground():
+                    with c.job('foreground_fixture_01'):entered.set()
+                high=threading.Thread(target=foreground);high.start()
+                deadline=time.monotonic()+1
+                while c.snapshot()['queued_jobs']!=1 and time.monotonic()<deadline:time.sleep(.005)
+                self.assertEqual(c.snapshot()['queued_jobs'],1);self.assertFalse(entered.is_set())
+                release.set();low.join(2);high.join(2);self.assertFalse(low.is_alive());self.assertFalse(high.is_alive())
                 self.assertEqual(len(results),1)
-                self.assertEqual((results[0]['status'],results[0]['retry_safe'],results[0]['reason']),('interrupted',False,'foreground_preempted'))
-                self.assertTrue(disconnected.wait(2))
-            finally:low.join(4);server.shutdown();server.server_close();thread.join(2)
+                self.assertEqual(results[0]['status'],'complete');self.assertTrue(entered.is_set())
+            finally:release.set();low.join(4);server.shutdown();server.server_close();thread.join(2)
 
 class MenuTests(unittest.TestCase):
     def test_only_exact_configured_client_https_entry_enabled(self):

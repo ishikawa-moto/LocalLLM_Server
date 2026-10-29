@@ -137,6 +137,7 @@ class LifecycleController:
         self.active_jobs = 0
         self.queued_jobs = 0
         self.foreground_waiters: list[str] = []
+        self.foreground_priorities: dict[str, int] = {}
         self.inflight_ids: set[str] = set()
         self.cancelled_ids: set[str] = set()
         self.active_task: dict | None = None
@@ -406,19 +407,17 @@ class LifecycleController:
         return stopped
 
     @contextlib.contextmanager
-    def job(self, request_id: str, role: str | None = None, metadata: dict | None = None):
+    def job(self, request_id: str, role: str | None = None, metadata: dict | None = None, priority: int = 0):
         if not REQUEST_ID.fullmatch(request_id): raise ValueError("invalid request ID")
+        if type(priority) is not int or priority not in (0, 1, 2): raise ValueError("invalid inference priority")
         with self.condition:
             if request_id in self.inflight_ids: raise RuntimeError("duplicate request ID")
             if self.queued_jobs >= self.config.max_queue: raise OverflowError("request queue is full")
             try: self._record(request_id, role, "queued", new=True)
             except sqlite3.IntegrityError: raise RuntimeError("duplicate request ID") from None
             self.inflight_ids.add(request_id); self.queued_jobs += 1; self.foreground_waiters.append(request_id); self.last_model_request = self.clock()
-            # Admission and background cancellation share the same lock. A new
-            # low-priority request cannot overtake an admitted foreground request.
-            background = self.background
-            if background is not None: background.cancel('foreground_preempted')
-        if background is not None: background.abort('foreground_preempted')
+            self.foreground_priorities[request_id] = priority
+            # An admitted request waits for the current inference to finish.
         self.audit("request_queued", request_id=request_id, **(metadata or {}))
         acquired = False; active_started = False
         terminal = "failed"
@@ -432,7 +431,8 @@ class LifecycleController:
                 if remaining <= 0:
                     terminal = "timed_out"; raise TimeoutError("queue wait timed out")
                 with self.condition:
-                    if self.foreground_waiters[0] == request_id:
+                    first = min(self.foreground_waiters, key=self.foreground_priorities.__getitem__)
+                    if first == request_id:
                         acquired = self.inference.acquire(blocking=False)
                     if not acquired:
                         self.condition.wait(timeout=min(.2, remaining))
@@ -442,6 +442,7 @@ class LifecycleController:
                     terminal = "cancelled"; raise InterruptedError("request cancelled")
                 self._record(request_id, role, "active")
                 self.foreground_waiters.remove(request_id)
+                del self.foreground_priorities[request_id]
                 self.queued_jobs -= 1; self.active_jobs += 1; self.state = ModelState.BUSY; self.last_model_request = self.clock()
                 self.active_task = {"request_id": request_id, "role": role, "task_id": (metadata or {}).get("task_id")}
                 active_started = True
@@ -459,6 +460,7 @@ class LifecycleController:
                     else:
                         self.queued_jobs = max(0, self.queued_jobs - 1)
                         if request_id in self.foreground_waiters: self.foreground_waiters.remove(request_id)
+                        self.foreground_priorities.pop(request_id, None)
                     self.inflight_ids.discard(request_id); self.cancelled_ids.discard(request_id)
                     self.active_connections.pop(request_id, None)
                     self._record(request_id, role, terminal)
@@ -473,17 +475,13 @@ class LifecycleController:
     def background_job(self, priority):
         """Fail-fast admission on the *same* inference semaphore; never starts Qwen."""
         from slack_gateway import Deferred, Lease
-        previous = None
         with self.condition:
-            if self.background is not None and priority < self.background.priority:
-                previous = self.background
-                previous.cancel('background_preempted')
-            candidate = (previous is None and self.background is None
+            candidate = (self.background is None
                         and self.active_jobs == 0 and self.queued_jobs == 0
                         and self.state == ModelState.READY and self.health(site_port('llm')))
             admitted = candidate and self.inference.acquire(blocking=False)
             reason = ('foreground_busy' if self.active_jobs or self.queued_jobs else
-                      'background_busy' if self.background is not None or previous is not None else
+                      'background_busy' if self.background is not None else
                       self.background_start_phase if self.background_start is not None else
                       'model_not_ready' if not candidate else 'inference_busy')
             if admitted:
@@ -493,7 +491,6 @@ class LifecycleController:
                 self.state = ModelState.BUSY
                 # Slack source/request/session identifiers never enter normal telemetry.
                 self.active_task = {"role": "restricted-background"}
-        if previous is not None: previous.abort('background_preempted')
         if not admitted: raise Deferred(reason)
         try:
             yield lease
