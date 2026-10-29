@@ -200,6 +200,46 @@ class GatewayLifecycleTests(unittest.TestCase):
         self.assertFalse(any(t.is_alive() for t in pending))
         self.assertEqual(entered, ['active-request', 'waiting-0002', 'waiting-0003', 'waiting-0001', 'waiting-0000'])
 
+    def test_restricted_inference_waits_between_continue_and_work(self):
+        from slack_gateway import RunCancellation
+        runtime = Runtime(); runtime.running = True
+        c = controller(runtime); entered = []; running = threading.Event(); release = threading.Event()
+        def ordinary(name, priority, hold=False):
+            with c.job(name, priority=priority):
+                entered.append(name)
+                if hold: running.set(); release.wait(3)
+        def restricted():
+            with c.restricted_job(RunCancellation(), time.monotonic()+3): entered.append('restricted')
+        active = threading.Thread(target=ordinary, args=('active-work', 2, True)); active.start()
+        self.assertTrue(running.wait(1))
+        workers = [threading.Thread(target=ordinary, args=('waiting-work',2)),
+                   threading.Thread(target=restricted),
+                   threading.Thread(target=ordinary, args=('waiting-continue',0))]
+        for index, worker in enumerate(workers):
+            worker.start(); deadline=time.monotonic()+1
+            while c.snapshot()['queued_jobs'] < index+1 and time.monotonic()<deadline: time.sleep(.005)
+            self.assertEqual(c.snapshot()['queued_jobs'],index+1)
+        self.assertEqual(entered,['active-work']); release.set(); active.join(3)
+        for worker in workers: worker.join(3)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(entered,['active-work','waiting-continue','restricted','waiting-work'])
+        self.assertEqual(c.snapshot()['queued_jobs'],0)
+
+    def test_restricted_wait_cancel_does_not_enter_or_leave_queue(self):
+        from slack_gateway import RunCancellation
+        runtime = Runtime(); runtime.running = True
+        c = controller(runtime); cancellation=RunCancellation(); errors=[]
+        def restricted():
+            try:
+                with c.restricted_job(cancellation,time.monotonic()+3): self.fail('cancelled request started')
+            except InterruptedError as exc: errors.append(exc)
+        with c.job('active-cancel-test'):
+            worker=threading.Thread(target=restricted); worker.start(); deadline=time.monotonic()+1
+            while c.snapshot()['queued_jobs'] != 1 and time.monotonic()<deadline: time.sleep(.005)
+            self.assertTrue(cancellation.abort()); worker.join(2)
+            self.assertFalse(worker.is_alive()); self.assertEqual(len(errors),1)
+        self.assertEqual(c.snapshot()['queued_jobs'],0)
+
     def test_cancel_active_request_closes_upstream_connection(self):
         runtime = Runtime(); runtime.running = True
         c = controller(runtime)

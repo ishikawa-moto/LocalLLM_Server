@@ -472,6 +472,60 @@ class LifecycleController:
             if active_started: self.audit("request_finished", request_id=request_id)
 
     @contextlib.contextmanager
+    def restricted_job(self, cancellation, deadline):
+        """Queue a restricted inference without journaling its identity or content."""
+        from slack_gateway import Deferred, Lease
+        token = 'restricted-' + uuid.uuid4().hex
+        lease = Lease(1)
+        admitted = False
+        with self.condition:
+            if self.queued_jobs >= self.config.max_queue: raise Deferred('foreground_busy')
+            if self.state not in (ModelState.READY, ModelState.BUSY) or not self.health(site_port('llm')):
+                raise Deferred(self.background_start_phase or 'model_not_ready')
+            self.foreground_waiters.append(token)
+            self.foreground_priorities[token] = 1
+            self.queued_jobs += 1
+        try:
+            while not admitted:
+                if cancellation.cancelled.is_set(): raise InterruptedError('restricted run cancelled')
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: raise Deferred('foreground_busy')
+                with self.condition:
+                    if (min(self.foreground_waiters, key=self.foreground_priorities.__getitem__) == token
+                            and self.inference.acquire(blocking=False)):
+                        self.foreground_waiters.remove(token)
+                        del self.foreground_priorities[token]
+                        self.queued_jobs -= 1
+                        self.active_jobs += 1
+                        self.background = lease
+                        self.state = ModelState.BUSY
+                        self.active_task = {'role': 'restricted-background'}
+                        admitted = True
+                    else:
+                        self.condition.wait(timeout=min(.2, remaining))
+            if cancellation.cancelled.is_set(): raise InterruptedError('restricted run cancelled')
+            yield lease
+            lease.check()
+        finally:
+            try:
+                if admitted: lease.abort('lease_released')
+            finally:
+                with self.condition:
+                    if admitted:
+                        self.background = None
+                        self.active_jobs -= 1
+                        self.active_task = None
+                        self.last_model_request = self.clock()
+                        try: self.state = ModelState.READY if self.health(site_port('llm')) else ModelState.STOPPED
+                        except Exception: self.state = ModelState.FAILED
+                        self.inference.release()
+                    elif token in self.foreground_waiters:
+                        self.foreground_waiters.remove(token)
+                        self.foreground_priorities.pop(token, None)
+                        self.queued_jobs -= 1
+                    self.condition.notify_all()
+
+    @contextlib.contextmanager
     def background_job(self, priority):
         """Fail-fast admission on the *same* inference semaphore; never starts Qwen."""
         from slack_gateway import Deferred, Lease
@@ -782,7 +836,10 @@ class Handler(BaseHTTPRequestHandler):
                     headers["X-LocalBrain-Approval-Owner"] = APPROVAL_OWNER
                 headers["X-LocalBrain-Apply-Certificate"] = hashlib.sha256(self.connection.getpeercert(binary_form=True)).hexdigest()
             if self.headers.get("Content-Type"): headers["Content-Type"] = self.headers["Content-Type"]
-            context = CONTROLLER.job(request_id, role=role, metadata=metadata) if model else contextlib.nullcontext()
+            # mTLS and the configured IP allowlist have already been checked.
+            # PC73 model traffic is Continue; local Work/Chat traffic waits below it.
+            priority = 0 if self.client_address[0] == site_value('client_address', 'localbrain-client', ROOT) else 2
+            context = CONTROLLER.job(request_id, role=role, metadata=metadata, priority=priority) if model else contextlib.nullcontext()
             with context:
                 CONTROLLER.ensure_base(); connection = http.client.HTTPConnection(LOOPBACK, port, timeout=900)
                 try:

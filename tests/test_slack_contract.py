@@ -40,13 +40,13 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(self.s.status(self.query())['state'],'unresolved')
         self.assertFalse(self.fixture.calls)
     def test_acknowledged_cancel_after_lease_release_prevents_complete(self):
-        original=self.s.controller.background_job
+        original=self.s.controller.restricted_job
         acknowledged=[]
         @contextlib.contextmanager
-        def release_then_cancel(priority):
-            with original(priority) as lease: yield lease
+        def release_then_cancel(cancellation,deadline):
+            with original(cancellation,deadline) as lease: yield lease
             acknowledged.append(self.cancel())
-        self.s.controller.background_job=release_then_cancel
+        self.s.controller.restricted_job=release_then_cancel
         result=self.s.execute('chat',self.value)
         self.assertEqual(acknowledged,[dict(cancelled=True)])
         self.assertEqual((result['status'],result['reason']),('interrupted','explicit_cancel'))
@@ -85,13 +85,13 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertFalse(result['quiescent'])
         self.assertFalse((self.fixture.root/'runtime').exists())
     def test_registered_finalization_is_busy_even_after_controller_releases_lease(self):
-        original=self.s.controller.background_job
+        original=self.s.controller.restricted_job
         seen=[]
         @contextlib.contextmanager
-        def observe(priority):
-            with original(priority) as lease: yield lease
+        def observe(cancellation,deadline):
+            with original(cancellation,deadline) as lease: yield lease
             seen.append((self.s.controller.snapshot()['active_jobs'],self.s.activity_snapshot()))
-        self.s.controller.background_job=observe
+        self.s.controller.restricted_job=observe
         self.s.execute('chat',self.value)
         self.assertEqual(seen[0][0],0)
         self.assertEqual(seen[0][1]['active_requests'],1)

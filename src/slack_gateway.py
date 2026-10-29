@@ -483,7 +483,7 @@ class SlackService:
                     return self.defer(action, start_reason)
             passes = []
             for index in range(1 if action == 'chat' else 2):
-                with self.controller.background_job(4 if action == 'chat' else 5) as lease:
+                with self.controller.restricted_job(cancellation, end) as lease:
                     if not reserved:
                         if retry is None:
                             self.store.reserve(value['request_id'], request_hash, value['session_id'], action)
