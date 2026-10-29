@@ -195,13 +195,18 @@ class LifecycleController:
     def job_status(self, request_id: str) -> dict | None:
         if self.journal_path is None:
             return None
-        with self._journal() as db:
-            row = db.execute("SELECT role,state,updated_at FROM jobs WHERE request_id=?", (request_id,)).fetchone()
-        if row is None:
-            return None
         with self.condition:
+            with self._journal() as db:
+                row = db.execute("SELECT role,state,updated_at FROM jobs WHERE request_id=?", (request_id,)).fetchone()
+            if row is None:
+                return None
             state = "interrupted" if row[1] in ("queued", "active") and request_id not in self.inflight_ids else row[1]
-        return {"request_id": request_id, "role": row[0], "state": state, "updated_at": row[2]}
+            notice = None
+            if state == 'queued' and self.active_jobs:
+                notice = '別の処理を実行中のため、しばらくお待ちください'
+            elif state == 'active':
+                notice = '処理を開始しました'
+            return {"request_id": request_id, "role": row[0], "state": state, "updated_at": row[2], "notice": notice}
 
     def cancel(self, request_id: str) -> bool:
         with self.condition:

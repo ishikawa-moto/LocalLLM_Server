@@ -240,6 +240,29 @@ class GatewayLifecycleTests(unittest.TestCase):
             self.assertFalse(worker.is_alive()); self.assertEqual(len(errors),1)
         self.assertEqual(c.snapshot()['queued_jobs'],0)
 
+    def test_job_status_reports_waiting_and_start_from_live_state(self):
+        runtime = Runtime(); runtime.running = True
+        with tempfile.TemporaryDirectory() as root:
+            c = controller(runtime); c.journal_path = pathlib.Path(root)/'jobs.sqlite3'
+            with c._journal() as db:
+                db.execute('CREATE TABLE jobs (request_id TEXT PRIMARY KEY, role TEXT, state TEXT NOT NULL, updated_at TEXT NOT NULL)')
+            active=threading.Event(); release=threading.Event(); worker_started=threading.Event(); worker_release=threading.Event()
+            def first():
+                with c.job('status-active-001'):
+                    active.set(); release.wait(3)
+            def second():
+                with c.job('status-waiting-01'):
+                    worker_started.set(); worker_release.wait(3)
+            one=threading.Thread(target=first); two=threading.Thread(target=second)
+            one.start(); self.assertTrue(active.wait(1)); two.start()
+            deadline=time.monotonic()+1
+            while c.snapshot()['queued_jobs']!=1 and time.monotonic()<deadline: time.sleep(.005)
+            self.assertEqual(c.job_status('status-waiting-01')['notice'],'別の処理を実行中のため、しばらくお待ちください')
+            release.set(); self.assertTrue(worker_started.wait(2))
+            self.assertEqual(c.job_status('status-waiting-01')['notice'],'処理を開始しました')
+            worker_release.set(); one.join(2); two.join(2)
+            self.assertIsNone(c.job_status('status-waiting-01')['notice'])
+
     def test_cancel_active_request_closes_upstream_connection(self):
         runtime = Runtime(); runtime.running = True
         c = controller(runtime)
