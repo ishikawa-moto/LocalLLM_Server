@@ -100,12 +100,14 @@ def enabled(root):
 
 class Mailbox:
     """One configured Host owns assignment. Metadata tombstones are never reused."""
-    def __init__(self, root, client_ip, owner, host_pin, chat_pin, clock=time.time):
+    def __init__(self, root, client_ip, owner, host_pin, chat_pin, clock=time.time, scope='chat'):
+        require(scope in ('chat','slack'), 'ocr_auth_unconfigured', 503)
+        self.scope = scope
         self.root, self.client_ip, self.owner = Path(root), client_ip, owner
         self.host_pin, self.chat_pin, self.clock = host_pin, chat_pin, clock
         require(identifier(host_pin, HASH) and identifier(chat_pin, HASH), 'ocr_auth_unconfigured', 503)
         require(not ipaddress.ip_address(client_ip).is_loopback, 'ocr_auth_unconfigured', 503)
-        self.directory = guarded(self.root/'runtime/chat-ocr')
+        self.directory = guarded(self.root/('runtime/chat-ocr' if scope == 'chat' else 'runtime/slack-ocr'))
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path, self.lock = self.directory/'mailbox.sqlite3', threading.RLock()
         self.max_active, self.max_records, self.quota = 8, 10000, 256*MIB
@@ -132,6 +134,20 @@ class Mailbox:
             return cls(root, client_ip, owner, policy['host_certificate_sha256'], pin)
         except (OSError, ValueError, KeyError, OcrError): return None
 
+    @classmethod
+    def slack_from_root(cls, root, client_ip, owner):
+        try:
+            path = Path(root)/'config/slack-ocr.json'
+            require(path.stat().st_size <= 1024)
+            setting = strict_json(path.read_bytes()); fields(setting, ('enabled',))
+            require(setting['enabled'] is True)
+            policy = strict_json((Path(root)/'config/slack-server.json').read_bytes())
+            require(policy.get('enabled') is True)
+            pem = (Path(root)/'config/tls/client.pem').read_text(encoding='ascii')
+            pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest()
+            return cls(root, client_ip, owner, policy['host_certificate_sha256'], pin, scope='slack')
+        except (OSError, ValueError, KeyError, OcrError): return None
+
     @contextlib.contextmanager
     def db(self):
         guarded(self.path)
@@ -147,11 +163,11 @@ class Mailbox:
     def authenticate(self, role, ip, cert, owner=None):
         require(bool(cert), 'ocr_client_denied', 403)
         fingerprint = hashlib.sha256(cert).hexdigest()
-        if role == 'worker':
+        if (self.scope == 'chat' and role == 'worker') or (self.scope == 'slack' and role == 'slack_host'):
             require(ip == self.client_ip and owner == self.owner and
                     hmac.compare_digest(fingerprint, self.host_pin), 'ocr_worker_denied', 403)
         else:
-            require(role == 'chat' and ip in ('127.0.0.1','::1') and
+            require(((self.scope == 'chat' and role == 'chat') or (self.scope == 'slack' and role == 'slack_worker')) and ip in ('127.0.0.1','::1') and
                     hmac.compare_digest(fingerprint, self.chat_pin), 'ocr_chat_denied', 403)
 
     def file(self, jid, suffix):
@@ -180,6 +196,7 @@ class Mailbox:
 
     def conversation_exists(self, cid):
         require(identifier(cid, CID))
+        if self.scope == 'slack': return
         path = guarded(self.root/'runtime/chat.sqlite3')
         require(path.exists(), 'ocr_conversation_missing', 404)
         import startup_gate
@@ -260,9 +277,11 @@ class Mailbox:
             if not row['registered'] and not row['cancel']:
                 raw = self.file(row['id'], '.input').read_bytes()
                 require(hashlib.sha256(raw).hexdigest() == row['input_hash'], 'ocr_input_corrupt', 503)
-            return {'job':dict(schema='localbrain.chat-ocr.job.v1',job_id=row['id'],conversation_id=row['conversation'],
+            result = dict(schema='localbrain.chat-ocr.job.v1',job_id=row['id'],conversation_id=row['conversation'],
                  input_sha256=row['input_hash'],extension=row['extension'],formats=json.loads(row['formats']),
-                 bytes=base64.b64encode(raw).decode() if raw is not None else None,cancel_requested=bool(row['cancel']))}
+                 bytes=base64.b64encode(raw).decode() if raw is not None else None,cancel_requested=bool(row['cancel']))
+            if self.scope == 'slack': result['origin']='slack'
+            return {'job':result}
 
     def validate_result(self, value, row):
         fields(value, ('schema','job_id','input_sha256','state','result','artifacts','warnings','external_ai','automatic_knowledge_adoption'))
@@ -272,9 +291,9 @@ class Mailbox:
                         'needs_review','external_ai','automatic_knowledge_adoption'), ('experimental',))
         require(result['profile'] in ('AUTO','PRINTED_TEXT','PDF_DOCUMENT','TABLE_LAYOUT','HANDWRITING') and
                 type(result['needs_review']) is bool and ('experimental' not in result or type(result['experimental']) is bool))
-        oid = hashlib.sha256(('chat_'+row['id']).encode()).hexdigest()[:32]
+        oid = hashlib.sha256((self.scope+'_'+row['id']).encode()).hexdigest()[:32]
         require(result.get('job_id') == oid and result.get('input_file_ref') == 'ocr:'+oid+'/input' and
-                result.get('input_sha256') == row['input_hash'] and result.get('origin') == 'chat' and
+                result.get('input_sha256') == row['input_hash'] and result.get('origin') == self.scope and
                 result.get('external_ai') == 'deny' and result.get('automatic_knowledge_adoption') is False and
                 result.get('status') == 'complete' and isinstance(result.get('text'), str), 'ocr_result_binding')
         pages = result.get('pages'); require(type(pages) is list and 1 <= len(pages) <= MAX_PAGES, 'ocr_page_limit')
@@ -411,7 +430,7 @@ class Mailbox:
             require(row['state'] == 'complete' and not row['cancel'], 'ocr_result_unavailable', 410)
             report = strict_json(self.file(row['id'], '.report').read_bytes())
             require(hashlib.sha256(canonical(report)).hexdigest() == row['report_hash'], 'ocr_report_corrupt',503)
-            if action == 'result': return {'text':report['result']['text']}
+            if action == 'result': return {'result':report['result']} if self.scope == 'slack' else {'text':report['result']['text']}
             require(isinstance(value.get('format'),str) and value['format'] in FORMATS)
             found = next((a for a in report['artifacts'] if a['format'] == value['format']),None)
             require(found is not None,'ocr_not_found',404)

@@ -674,6 +674,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(503,{'error':'activation_held'})
         if startup_gate.enabled(): CONTROLLER.refresh_after_activation()
         if self.path.startswith("/v1/chat-ocr"): return self.chat_ocr_request()
+        if self.path.startswith("/v1/slack-ocr/"): return self.slack_ocr_request()
         if self.path.startswith("/v1/slack"): return self.slack_request()
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == "/v1/control/job-status":
@@ -700,6 +701,7 @@ class Handler(BaseHTTPRequestHandler):
         if not startup_gate.opened(): return self.send_json(503,{'error':'activation_held'})
         if startup_gate.enabled(): CONTROLLER.refresh_after_activation()
         if self.path.startswith("/v1/chat-ocr"): return self.chat_ocr_request()
+        if self.path.startswith("/v1/slack-ocr/"): return self.slack_ocr_request()
         if self.path.startswith("/v1/slack"): return self.slack_request()
         if self.headers.get("X-LocalBrain-Data-Class") == "slack_restricted":
             return self.send_json(403, {"error":"restricted_route_required"})
@@ -785,6 +787,27 @@ class Handler(BaseHTTPRequestHandler):
             self.connection.settimeout(15); raw = self.rfile.read(size)
             if len(raw) != size: raise OcrError('ocr_invalid_framing')
             return self.send_json(200, service.dispatch(action,strict_json(raw)))
+        except OcrError as exc: return self.send_json(exc.status,{'error':exc.code})
+        except (ValueError, UnicodeError): return self.send_json(400,{'error':'ocr_invalid_json'})
+        except Exception: return self.send_json(503,{'error':'ocr_unavailable'})
+
+    def slack_ocr_request(self):
+        from chat_ocr import OcrError, strict_json, MAX_REPORT, MIB
+        service = getattr(self.server, 'slack_ocr_service', None)
+        if service is None: return self.send_json(503, {'error':'ocr_disabled'})
+        try:
+            action = self.path.rsplit('/',1)[-1]
+            if self.command != 'POST' or action not in {'next','update','submit','status','cancel','result','forget'} or self.path != '/v1/slack-ocr/'+action:
+                return self.send_json(404, {'error':'ocr_not_found'})
+            service.authenticate('slack_worker' if action in ('next','update') else 'slack_host',self.client_address[0],
+                self.connection.getpeercert(binary_form=True),self.headers.get('X-LocalBrain-Approval-Owner'))
+            lengths = self.headers.get_all('Content-Length', [])
+            if self.headers.get('Transfer-Encoding') or len(lengths) != 1: raise OcrError('ocr_invalid_framing')
+            size = int(lengths[0]); limit = MAX_REPORT if action == 'update' else (6*MIB if action == 'submit' else 2048)
+            if not 0 < size <= limit: raise OcrError('ocr_size_limit',413)
+            self.connection.settimeout(15); raw = self.rfile.read(size)
+            if len(raw) != size: raise OcrError('ocr_invalid_framing')
+            return self.send_json(200,service.dispatch(action,strict_json(raw)))
         except OcrError as exc: return self.send_json(exc.status,{'error':exc.code})
         except (ValueError, UnicodeError): return self.send_json(400,{'error':'ocr_invalid_json'})
         except Exception: return self.send_json(503,{'error':'ocr_unavailable'})
@@ -911,6 +934,9 @@ def main() -> None:
         site_value("client_address", "localbrain-client", ROOT), APPROVAL_OWNER, resource_status=resource_status)
     from chat_ocr import Mailbox
     server.chat_ocr_service = Mailbox.from_root(ROOT, site_value('client_address', 'localbrain-client', ROOT), APPROVAL_OWNER)
+    server.slack_ocr_service = Mailbox.slack_from_root(ROOT, site_value('client_address', 'localbrain-client', ROOT), APPROVAL_OWNER)
+    if server.slack_ocr_service is not None:
+        threading.Thread(target=startup_gate.run_after_open,args=(server.slack_ocr_service.maintenance,), daemon=True).start()
     if server.chat_ocr_service is not None:
         threading.Thread(target=startup_gate.run_after_open,args=(server.chat_ocr_service.maintenance,), daemon=True).start()
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH); context.load_cert_chain(TLS / "server.pem", TLS / "server-key.pem")

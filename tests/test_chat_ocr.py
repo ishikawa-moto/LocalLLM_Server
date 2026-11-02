@@ -59,6 +59,23 @@ class MailboxFixture(unittest.TestCase):
         if code: self.assertEqual(ctx.exception.code,code)
 
 class MailboxTests(MailboxFixture):
+    def test_slack_scope_separates_roles_and_validates_origin(self):
+        box=ocr.Mailbox(self.root,'192.0.2.73','ClientPC-host',self.pin,self.pin,lambda:self.now,scope='slack')
+        box.authenticate('slack_host','192.0.2.73',self.cert,'ClientPC-host')
+        box.authenticate('slack_worker',LOOPBACK,self.cert)
+        for role,ip,cert,owner in [('slack_worker','192.0.2.73',self.cert,'ClientPC-host'),
+                ('slack_host',LOOPBACK,self.cert,'ClientPC-host'),('slack_worker',LOOPBACK,b'wrong',None),
+                ('slack_host','192.0.2.73',self.cert,'wrong'),('worker','192.0.2.73',self.cert,'ClientPC-host')]:
+            self.reject(lambda:box.authenticate(role,ip,cert,owner))
+        value=self.request();box.submit(value)
+        self.assertEqual(box.next({'schema':'localbrain.chat-ocr.poll.v1'})['job']['origin'],'slack')
+        result=self.result(value); result['result']['origin']='slack'
+        oid=hashlib.sha256(('slack_'+value['job_id']).encode()).hexdigest()[:32]
+        result['result'].update(job_id=oid,input_file_ref='ocr:'+oid+'/input')
+        box.update(result)
+        self.assertEqual(box.chat('result',{'conversation_id':self.cid,'job_id':value['job_id']})['result']['origin'],'slack')
+        self.assertEqual(self.box.chat('status',{'conversation_id':self.cid})['jobs'],[])
+
     def test_roles_use_peer_and_pin_not_asserted_origin(self):
         self.box.authenticate('chat',LOOPBACK,self.cert,'forged-owner')
         self.box.authenticate('worker','192.0.2.73',self.cert,'ClientPC-host')

@@ -1,6 +1,8 @@
 <a id="slack-server-candidate-contract"></a>
 # Slack Server候補の契約
 
+LocalBrain v3のPC70 OCR転送は「PC70 OCR転送」節の既定無効の候補です。以下の既存配備の検証記録と、新経路のWindows/AppContainer・mTLS未検証を区別してください。新経路の本番反映は行っていません。
+
 状態は、mainに対するレビュー準備が整ったServer側契約です。上限付きローカル起動経路は公開入力で検証し、承認済み導入環境ではChat承認入口と人間に結び付く適用の有効化も確認しました。Slack全体とモバイル承認の検証は別です。Socket Mode、OCR、永続ACK、Session／job保持、利用者管理、HTTPS／モバイル承認、Slackへの送信は独立Clientリポジトリが所有し、このServer変更で実装する機能ではありません。
 
 knowledgeとRule双方の実際の公開fixture要求／応答ペアは`tests/fixtures/slack-contract.json`にあります。証明書・承認者・ownerはfixture用の値で、配備identityではありません。
@@ -105,7 +107,11 @@ approval ID、nonce、外側Request ID、proposalごと1行のaccepted記録をS
 <a id="restricted-data-boundary"></a>
 ## 制限付きデータの境界
 
-Server状態はGit対象外の`runtime/slack-restricted/state.sqlite3`だけに置きます（runs、proposals、approval receipt、accepted制限項目、列挙Slack rule state）。symlink／reparse storage pathを拒否します。通常SecondBrain、Chat履歴、embedding、TaskMemory、通常source control／exportへ挿入しません。原本と派生データには`origin=slack`、`data_class=slack_restricted`、`external_ai=deny`、`cloud_fallback=false`を付けます。制限routeのaccess logは抑制し、通常lifecycle telemetryには一般的background roleだけを出し、Slack Request／Session／source IDは出しません。
+PC70側Slack OCR転送の候補は `config/slack-ocr.json` の `enabled` が明示的に `true` の場合だけ有効です。公開例 `config/slack-ocr.example.json` は無効です。既存GatewayのmTLSを使い、PC73 Hostは許可IP・Host証明書pin・ownerでsubmit/resultを、PC70 Bridgeはループバックから既存ローカルクライアント証明書のpinでnext/updateを利用します。PC70 Host設定のGateway名とServer証明書SANの一致が必要です。Slack OCRは専用非公開領域に分離し、入力2時間・結果24時間の期限を適用します。既存Chat conversationとは共有せず、通常TaskMemoryやSecondBrainに取り込みません。
+
+PC70 workerは既存CPU OCRとAppContainerの実行許可・通信隔離を前提とし、隔離できない場合の通常Pythonへのfallbackはありません。PC73本番には未反映で、Windows実機のAppContainerとmTLSを通した一連の動作は未検証です。
+
+Serverの制限付き推論・提案状態はGit対象外の`runtime/slack-restricted/state.sqlite3`に置きます（runs、proposals、approval receipt、accepted制限項目、列挙Slack rule state）。上記OCR転送の候補は別のSlack専用非公開領域を使います。symlink／reparse storage pathを拒否します。通常SecondBrain、Chat履歴、embedding、TaskMemory、通常source control／exportへ挿入しません。原本と派生データには`origin=slack`、`data_class=slack_restricted`、`external_ai=deny`、`cloud_fallback=false`を付けます。制限routeのaccess logは抑制し、通常lifecycle telemetryには一般的background roleだけを出し、Slack Request／Session／source IDは出しません。
 
 通常Gateway proxy経路は、ネストしたclassificationや`X-LocalBrain-Data-Class: slack_restricted`を含む明示Slack restrictionを拒否します。信頼されたHostが分類を除いた後はServerに推定できません。Client RestrictedExecutionの送信先制御は必須で、共同検証が残っています。これはOS sandboxや管理者による制限DBのコピーを防ぐ保証ではありません。PC全体／ローカルbackupは私有として扱い、runtimeやコピーしたsource／receipt本文をreview packetへuploadしません。Host通知のlogical Session退役は以下に実装します。Server自身が30日／7日保持方針やschedulerを実行することはありません。corpus読取／検索と両側の保持／outbox検証は残件で、本番利用はHOLDです。
 
