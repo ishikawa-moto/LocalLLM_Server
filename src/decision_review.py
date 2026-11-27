@@ -11,7 +11,8 @@ from site_settings import site_value
 
 POLICY = 'decision-review-and-reaffirm-v1'
 SCHEMA = 'localbrain.decision-review.v1'
-MODES = ('proposal', 'user_request')
+ADOPTION_MODES = ('proposal', 'user_request')
+MODES = (*ADOPTION_MODES, 'review_only')
 
 
 class DecisionReviewer:
@@ -49,7 +50,9 @@ class DecisionReviewer:
                     and re.fullmatch('[a-f0-9]{64}',client['certificate_sha256'])
                     and client.get('source')=='mTLS Gateway / trusted Continue approval','host_attestation_required','Owned Host registration required.',403)
             require(request_mode in MODES and safe_id(task_id) and safe_id(workspace_id))
-            require(host_policy_hash==policy['host_policy_hash'] and proposal['payload']['project'] in policy['projects'],'review_policy_mismatch','Review scope differs from installed policy.',403)
+            require(host_policy_hash==policy['host_policy_hash'] and
+                    (request_mode=='review_only' or proposal['payload']['project'] in policy['projects']),
+                    'review_policy_mismatch','Review scope differs from installed policy.',403)
             initial={'schema':SCHEMA,'policy':POLICY,'model':MODEL,'proposal_id':proposal_id,'proposal_hash':proposal['proposal_hash'],
                      'request_mode':request_mode,'host_policy_hash':host_policy_hash,'task_id':task_id,'workspace_id':workspace_id,
                      'client_certificate_sha256':client['certificate_sha256'],'state':'queued','issues':[],'review_passes':0}
@@ -83,26 +86,28 @@ class DecisionReviewer:
 
     def _input(self, record):
         policy=self.policy(); proposal=ProposalStore(self.brain).read(record['proposal_id']); payload=proposal['payload']
-        require(record['policy']==POLICY and record['host_policy_hash']==policy['host_policy_hash'] and payload['project'] in policy['projects'])
+        mode=record['request_mode']
+        require(mode in MODES and record['policy']==POLICY and record['host_policy_hash']==policy['host_policy_hash'] and
+                (mode=='review_only' or payload['project'] in policy['projects']))
         require(proposal['proposal_hash']==record['proposal_hash'],'proposal_hash_mismatch','Proposal changed.',409)
         raw=('# '+payload['title']+'\n\n'+payload['body']+'\n').encode('utf-8')
         require(len(raw)<=MAX_DRAFT_BYTES,'review_budget','Draft exceeds review budget.')
         parts=statements(raw.decode('utf-8'));require(1<=len(parts)<=MAX_SEGMENTS,'review_budget','Draft has too many statements.')
         refs=payload['references']; sources=[]
         # Automatic model proposals preserve two distinct immutable raw-source requirements.
-        if record['request_mode']=='proposal':
+        if mode!='user_request':
             require(2<=len(refs)<=4,'needs_evidence','Automatic proposals require 2-4 distinct immutable raw sources.')
         else:require(1<=len(refs)<=4,'needs_evidence','Explicit save requests require current reference snapshots.')
         for ref in refs:
             snapshot=ApplyEngine(self.brain).target(ref,payload['project'],reference=True)
-            if record['request_mode']=='proposal':DraftReviewer(self.brain,self.judge)._source(ref['path'])
+            if mode!='user_request':DraftReviewer(self.brain,self.judge)._source(ref['path'])
             text=snapshot['content'];require(len(text.encode('utf-8'))<=MAX_SOURCE_BYTES,'review_budget','Source exceeds review budget.')
             require(not any(p.search(text) for p in SECRET_PATTERNS),'secret_detected','Source contains protected material.')
             match=re.fullmatch(r'L([1-9][0-9]*)(?:-L?([1-9][0-9]*))?',ref['relevant_location'])
             first,last=int(match[1]),int(match[2] or match[1]);excerpt='\n'.join(text.splitlines()[first-1:last])
             sources.append({'path':ref['path'],'text':excerpt,'sha256':snapshot['expected_hash'],'metadata_sha256':snapshot['expected_metadata_hash']})
         require(len({s['path'] for s in sources})==len(sources),'needs_evidence','References must be distinct.')
-        if record['request_mode']=='proposal':require(len({s['sha256'] for s in sources})>=2,'needs_evidence','Raw source contents must differ.')
+        if mode!='user_request':require(len({s['sha256'] for s in sources})>=2,'needs_evidence','Raw source contents must differ.')
         require(sum(len(s['text'].encode('utf-8')) for s in sources)<=MAX_TOTAL_SOURCE_BYTES,'review_budget','Combined review sources exceed budget.')
         digest=sha(encoded({'proposal_hash':proposal['proposal_hash'],'sources':sources,'policy':POLICY,'mode':record['request_mode'],'model':MODEL}))
         return proposal,parts,sources,digest
@@ -117,7 +122,7 @@ class DecisionReviewer:
             quote=row.get('source_quote');source=by_path.get(row.get('source_path'))
             require(source and isinstance(quote,str) and len(quote.strip())>=20 and quote in source['text'],'reviewer_issues','Review citation is not an exact selected-source quote.')
             seen.add(row['id']);result.append({'id':row['id'],'source_path':source['path'],'source_quote':quote})
-        if mode=='proposal':require(len({r['source_path'] for r in result})>=2,'reviewer_issues','Automatic approval needs coverage from two sources.')
+        if mode!='user_request':require(len({r['source_path'] for r in result})>=2,'reviewer_issues','Model proposals need coverage from two sources.')
         return result
 
     def candidates(self):
@@ -175,11 +180,12 @@ class DecisionReviewer:
                     _,_,_,fresh=self._input(record);require(fresh==input_hash,'stale_review','Inputs changed before preflight deferral.',409)
                 atomic(self.record_path(path.stem),encoded(record))
             return {'path':str(path),'state':'deferred' if deferred else 'review_unresolved'}
+        state='reviewed_only' if record['request_mode']=='review_only' else 'approved'
         with guard(self.brain):
             _,_,_,fresh=self._input(record);require(fresh==input_hash,'stale_review','Inputs changed during review.',409)
-            record.update(state='approved',review_passes=2,passes=passes,input_hash=input_hash,issues=[],return_count=0,reviewed_at=int(time.time()))
+            record.update(state=state,review_passes=2,passes=passes,input_hash=input_hash,issues=[],return_count=0,reviewed_at=int(time.time()))
             atomic(self.record_path(path.stem),encoded(record))
-        return {'path':str(path),'state':'approved'}
+        return {'path':str(path),'state':state}
 
 
 def validate_automatic_approval(brain,operation,payload,client):
@@ -195,6 +201,8 @@ def validate_automatic_approval(brain,operation,payload,client):
     require(payload['request_id']==payload['origin_proposal_id'],'review_identity_mismatch','Automatic adoption must keep its registered proposal ID.',409)
     require(approval['host_policy_hash']==policy['host_policy_hash'],'review_policy_mismatch','Host policy differs.',409)
     record=reviewer.read_record(approval['proposal_id']);require(record is not None)
+    require(record['request_mode'] in ADOPTION_MODES and payload['project'] in policy['projects'],
+            'review_only_no_adoption','This review cannot authorize automatic adoption.',403)
     require(record['task_id']==approval['task_id'] and record['proposal_hash']==approval['proposal_hash'] and record['client_certificate_sha256']==client['certificate_sha256'],'review_identity_mismatch','Review owner/content differs.',409)
     require(approval['review_receipt_hash']==sha(encoded(record)),'stale_review','Review receipt differs.',409)
     if approval['provenance']=='human-reaffirmed-returned-decision':
