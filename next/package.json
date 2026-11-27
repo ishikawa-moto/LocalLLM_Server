@@ -1,0 +1,10 @@
+{
+  "name": "localbrain-next",
+  "version": "0.1.0",
+  "dependencies": {
+    "@earendil-works/chord": "1.6.1",
+    "@earendil-works/pi-ai": "1.6.1",
+    "@earendil-works/pi-durable": "1.6.1"
+  },
+  "private": true
+}
