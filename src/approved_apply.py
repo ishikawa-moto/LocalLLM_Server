@@ -330,6 +330,9 @@ class ApplyEngine:
                     and approval['proposal_hash'] == payload['expected_proposal_hash']
                     and approval['provenance'] == 'human-reviewed-model-proposal',
                     'approval_mismatch', 'Host approval is not bound to the proposal.', 409)
+            from decision_review import DecisionReviewer
+            require(DecisionReviewer(self.brain).read_record(payload['origin_proposal_id']) is None,
+                    'review_receipt_required', 'A registered review requires its exact version 3 receipt.', 409)
         else:
             require(approval['proposal_id'] is None and approval['proposal_hash'] is None
                     and approval['provenance'] == 'explicit-human-owned-decision')

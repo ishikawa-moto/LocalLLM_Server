@@ -1,6 +1,5 @@
 """Bound decision reviews; no adoption or invented human approval here."""
 import json
-import pathlib
 import re
 import time
 from approved_apply import ProposalStore, ApplyEngine, Rejected, require, safe_id, sha, encoded, atomic, HOST_OWNER
@@ -24,9 +23,11 @@ class DecisionReviewer:
         require(p.is_file() and not p.is_symlink() and not p.parent.is_symlink()
                 and not getattr(p.parent,'is_junction',lambda:False)(), 'review_policy_disabled','Decision review policy is not installed.',409)
         v=json.loads(p.read_bytes())
-        require(isinstance(v,dict) and set(v)=={'version','enabled','policy','host_policy_hash','projects'} and type(v['version']) is int and v['version']==1 and v['enabled'] is True and v['policy']==POLICY)
+        required={'version','enabled','policy','host_policy_hash'}
+        require(isinstance(v,dict) and required<=v.keys()<=required|{'projects'} and type(v['version']) is int and v['version']==1 and v['enabled'] is True and v['policy']==POLICY)
         require(isinstance(v['host_policy_hash'],str) and re.fullmatch('[a-f0-9]{64}',v['host_policy_hash']))
-        require(isinstance(v['projects'],list) and v['projects'] and all(isinstance(project,str) and re.fullmatch(r'[\w.-]{1,80}',project) for project in v['projects']))
+        if 'projects' in v:
+            require(isinstance(v['projects'],list) and all(isinstance(project,str) and re.fullmatch(r'[\w.-]{1,80}',project) for project in v['projects']))
         return v
 
     def record_path(self, proposal_id):
@@ -50,9 +51,8 @@ class DecisionReviewer:
                     and re.fullmatch('[a-f0-9]{64}',client['certificate_sha256'])
                     and client.get('source')=='mTLS Gateway / trusted Continue approval','host_attestation_required','Owned Host registration required.',403)
             require(request_mode in MODES and safe_id(task_id) and safe_id(workspace_id))
-            require(host_policy_hash==policy['host_policy_hash'] and
-                    (request_mode=='review_only' or proposal['payload']['project'] in policy['projects']),
-                    'review_policy_mismatch','Review scope differs from installed policy.',403)
+            require(host_policy_hash==policy['host_policy_hash'],
+                    'review_policy_mismatch','Host policy differs from installed policy.',403)
             initial={'schema':SCHEMA,'policy':POLICY,'model':MODEL,'proposal_id':proposal_id,'proposal_hash':proposal['proposal_hash'],
                      'request_mode':request_mode,'host_policy_hash':host_policy_hash,'task_id':task_id,'workspace_id':workspace_id,
                      'client_certificate_sha256':client['certificate_sha256'],'state':'queued','issues':[],'review_passes':0}
@@ -60,10 +60,13 @@ class DecisionReviewer:
             if previous:
                 keys=('proposal_hash','request_mode','host_policy_hash','task_id','workspace_id','client_certificate_sha256')
                 require(all(previous[k]==initial[k] for k in keys),'review_id_conflict','Existing review belongs to another exact request.',409)
-            else:atomic(self.record_path(proposal_id),encoded(initial))
-        # Signal only the already committed proposal, using existing hidden/coalesced dispatch.
-        from draft_review_queue import signal
-        signal(self.brain)
+            else:
+                require(request_mode in ADOPTION_MODES,'legacy_review_mode','Use proposal or user_request for new reviews.',409)
+                atomic(self.record_path(proposal_id),encoded(initial))
+        # Retrying registration can recover a lost dispatch signal, but never requeues terminal or in-flight work.
+        if previous is None or previous['state'] in ('queued','deferred'):
+            from draft_review_queue import signal
+            signal(self.brain)
         return self.status(proposal_id)
 
     def status(self, proposal_id):
@@ -84,42 +87,66 @@ class DecisionReviewer:
                 'state':record['state'],'review_receipt':record,'review_receipt_hash':sha(encoded(record)),
                 'apply_state':apply_state,'apply_result':outcome}
 
-    def _input(self, record):
-        policy=self.policy(); proposal=ProposalStore(self.brain).read(record['proposal_id']); payload=proposal['payload']
-        mode=record['request_mode']
-        require(mode in MODES and record['policy']==POLICY and record['host_policy_hash']==policy['host_policy_hash'] and
-                (mode=='review_only' or payload['project'] in policy['projects']))
+    def _bound_proposal(self, record):
+        policy=self.policy(); proposal=ProposalStore(self.brain).read(record['proposal_id'])
+        require(record['request_mode'] in MODES and record['policy']==POLICY and record['model']==MODEL
+                and record['host_policy_hash']==policy['host_policy_hash'],
+                'review_policy_mismatch','Review differs from installed policy.',409)
         require(proposal['proposal_hash']==record['proposal_hash'],'proposal_hash_mismatch','Proposal changed.',409)
+        return proposal
+
+    def _input(self, record):
+        proposal=self._bound_proposal(record); payload=proposal['payload']; mode=record['request_mode']
         raw=('# '+payload['title']+'\n\n'+payload['body']+'\n').encode('utf-8')
         require(len(raw)<=MAX_DRAFT_BYTES,'review_budget','Draft exceeds review budget.')
         parts=statements(raw.decode('utf-8'));require(1<=len(parts)<=MAX_SEGMENTS,'review_budget','Draft has too many statements.')
+        sources=self._sources(payload,mode,review_limits=True)
+        require(sum(len(s['text'].encode('utf-8')) for s in sources)<=MAX_TOTAL_SOURCE_BYTES,'review_budget','Combined review sources exceed budget.')
+        digest=sha(encoded({'proposal_hash':proposal['proposal_hash'],'sources':sources,'policy':POLICY,'mode':mode,'model':MODEL}))
+        return parts,sources,digest
+
+    def _sources(self, payload, mode, *, review_limits=False):
         refs=payload['references']; sources=[]
-        # Automatic model proposals preserve two distinct immutable raw-source requirements.
-        if mode!='user_request':
-            require(2<=len(refs)<=4,'needs_evidence','Automatic proposals require 2-4 distinct immutable raw sources.')
-        else:require(1<=len(refs)<=4,'needs_evidence','Explicit save requests require current reference snapshots.')
+        minimum=1 if mode=='user_request' else 2
+        require(len(refs)>=minimum,'needs_evidence','Model proposals require two distinct immutable raw sources.')
+        if review_limits:
+            require(len(refs)<=4,'needs_evidence','Automatic review supports at most four current references.')
+        engine=ApplyEngine(self.brain)
+        raw_reviewer=DraftReviewer(self.brain,self.judge)
         for ref in refs:
-            snapshot=ApplyEngine(self.brain).target(ref,payload['project'],reference=True)
-            if mode!='user_request':DraftReviewer(self.brain,self.judge)._source(ref['path'])
-            text=snapshot['content'];require(len(text.encode('utf-8'))<=MAX_SOURCE_BYTES,'review_budget','Source exceeds review budget.')
+            snapshot=engine.target(ref,payload['project'],reference=True)
+            text=snapshot['content']
             require(not any(p.search(text) for p in SECRET_PATTERNS),'secret_detected','Source contains protected material.')
+            if review_limits:
+                require(len(text.encode('utf-8'))<=MAX_SOURCE_BYTES,'review_budget','Source exceeds review budget.')
+            if mode!='user_request':
+                try:
+                    raw_reviewer._source(ref['path'])
+                except ValueError as error:
+                    raise Rejected('needs_evidence',str(error)) from error
             match=re.fullmatch(r'L([1-9][0-9]*)(?:-L?([1-9][0-9]*))?',ref['relevant_location'])
             first,last=int(match[1]),int(match[2] or match[1]);excerpt='\n'.join(text.splitlines()[first-1:last])
             sources.append({'path':ref['path'],'text':excerpt,'sha256':snapshot['expected_hash'],'metadata_sha256':snapshot['expected_metadata_hash']})
-        require(len({s['path'] for s in sources})==len(sources),'needs_evidence','References must be distinct.')
+        if review_limits or mode!='user_request':
+            require(len({s['path'].casefold() for s in sources})==len(sources),'needs_evidence','References must be distinct.')
         if mode!='user_request':require(len({s['sha256'] for s in sources})>=2,'needs_evidence','Raw source contents must differ.')
-        require(sum(len(s['text'].encode('utf-8')) for s in sources)<=MAX_TOTAL_SOURCE_BYTES,'review_budget','Combined review sources exceed budget.')
-        digest=sha(encoded({'proposal_hash':proposal['proposal_hash'],'sources':sources,'policy':POLICY,'mode':record['request_mode'],'model':MODEL}))
-        return proposal,parts,sources,digest
+        return sources
 
     @staticmethod
     def vote(value,parts,sources,mode):
-        require(isinstance(value,dict) and value.get('verdict')=='approve','reviewer_issues',str(value.get('reason','Reviewer did not approve.'))[:1000] if isinstance(value,dict) else 'Invalid reviewer response.')
+        if not isinstance(value,dict) or value.get('verdict') not in ('approve','needs_evidence','reject'):
+            raise ValueError('Unrecognized Reviewer verdict.')
+        if value['verdict']!='approve':
+            reason=value.get('reason')
+            if not isinstance(reason,str) or not reason.strip():reason='Reviewer did not approve.'
+            for pattern in SECRET_PATTERNS:reason=pattern.sub('[redacted]',reason)
+            raise Rejected('reviewer_issues',reason[:1000])
         rows=value.get('items');require(isinstance(rows,list) and len(rows)==len(parts),'reviewer_issues','Reviewer omitted statements.')
         seen=set();result=[];by_path={s['path']:s for s in sources}
         for row in rows:
             require(isinstance(row,dict) and type(row.get('id')) is int and row['id'] in {p['id'] for p in parts} and row['id'] not in seen,'reviewer_issues','Invalid statement coverage.')
-            quote=row.get('source_quote');source=by_path.get(row.get('source_path'))
+            quote=row.get('source_quote');source_path=row.get('source_path')
+            source=by_path.get(source_path) if isinstance(source_path,str) else None
             require(source and isinstance(quote,str) and len(quote.strip())>=20 and quote in source['text'],'reviewer_issues','Review citation is not an exact selected-source quote.')
             seen.add(row['id']);result.append({'id':row['id'],'source_path':source['path'],'source_quote':quote})
         if mode!='user_request':require(len({r['source_path'] for r in result})>=2,'reviewer_issues','Model proposals need coverage from two sources.')
@@ -135,57 +162,82 @@ class DecisionReviewer:
         record=self.read_record(path.stem)
         return bool(record and record['state'] in ('queued','deferred'))
 
+    def reconcile_interrupted(self):
+        # Called under the existing queue lease and writer guard, after any prior worker has exited.
+        for path in self.candidates():
+            record=self.read_record(path.stem)
+            if record and record['state']=='reviewing':
+                record.update(state='review_unresolved',error_type='InterruptedReview')
+                atomic(self.record_path(path.stem),encoded(record))
+
+    def _return_issue(self,path,record,error,failed_pass=None):
+        # A legacy review-only job can never become a human or automatic adoption receipt.
+        returned=record['request_mode'] in ADOPTION_MODES
+        issue={'code':error.code,'message':error.reason}
+        if failed_pass is not None:issue['pass_number']=failed_pass
+        record.update(state='returned' if returned else 'needs_evidence',issues=[issue],
+                      return_count=int(returned),reviewed_at=int(time.time()))
+        record.setdefault('passes',[])
+        atomic(self.record_path(path.stem),encoded(record))
+        return {'path':str(path),'state':record['state'],'issues':record['issues']}
+
+    def _unresolved(self,path,record,error):
+        record.update(state='review_unresolved',error_type=type(error).__name__)
+        atomic(self.record_path(path.stem),encoded(record))
+        return {'path':str(path),'state':record['state']}
+
     def review(self,path):
         with guard(self.brain):
             record=self.read_record(path.stem); require(record is not None)
             if record['state'] not in ('queued','deferred'):return {'path':str(path),'state':'unchanged'}
             # Returned requests are terminal for these exact bytes: one return, never a review loop.
-            try:proposal,parts,sources,input_hash=self._input(record)
+            try:parts,sources,input_hash=self._input(record)
             except Rejected as error:
-                state='returned' if record['request_mode']=='user_request' and error.code in ('needs_evidence','review_budget') else 'needs_evidence'
-                record.update(state=state,issues=[{'code':error.code,'message':error.reason}],return_count=1 if state=='returned' else 0,reviewed_at=int(time.time()))
-                atomic(self.record_path(path.stem),encoded(record));return {'path':str(path),'state':state,'issues':record['issues']}
+                return self._return_issue(path,record,error)
+            except Exception as error:
+                return self._unresolved(path,record,error)
             # Resume only known unattempted work after a read-only preflight deferral.
             passes=record.get('passes',[])
-            require(isinstance(passes,list) and len(passes)<=2 and record['review_passes']==len(passes),
-                    'review_integrity','Completed review passes differ from their receipt.',409)
-            if passes:
-                require(record.get('input_hash')==input_hash,'stale_review','Inputs changed before deferred review resumed.',409)
-                for vote in passes:self.vote({'verdict':'approve','items':vote},parts,sources,record['request_mode'])
+            try:
+                require(isinstance(passes,list) and len(passes)<=1 and record['review_passes']==len(passes),
+                        'review_integrity','Completed review passes differ from their receipt.',409)
+                if record.get('input_hash') is not None:
+                    require(record['input_hash']==input_hash,'stale_review','Inputs changed before deferred review resumed.',409)
+                for accepted in passes:
+                    self.vote({'verdict':'approve','items':accepted},parts,sources,record['request_mode'])
+            except Rejected as error:
+                return self._unresolved(path,record,error)
+            record.pop('error_type',None)
             record.update(state='reviewing',input_hash=input_hash,started_at=int(time.time()))
             atomic(self.record_path(path.stem),encoded(record))
         packet={'draft_path':path.relative_to(self.brain.docs).as_posix(),'statements':parts,'sources':[{'path':s['path'],'text':s['text']} for s in sources]}
-        try:
-            for number in range(len(passes)+1,3):
-                vote=self.vote(self.judge(packet,number),parts,sources,record['request_mode'])
+        for number in range(len(passes)+1,3):
+            try:
+                result=self.judge(packet,number)
+            except Exception as error:
                 with guard(self.brain):
-                    _,_,_,fresh=self._input(record);require(fresh==input_hash,'stale_review','Inputs changed during review.',409)
-                    passes.append(vote)
-                    record.update(review_passes=len(passes),passes=passes)
-                    atomic(self.record_path(path.stem),encoded(record))
-        except Rejected as error:
-            record.update(state='returned' if record['request_mode']=='user_request' else 'needs_evidence',issues=[{'code':error.code,'message':error.reason}],
-                          return_count=1 if record['request_mode']=='user_request' else 0,review_passes=len(passes),passes=passes,input_hash=input_hash,reviewed_at=int(time.time()))
+                    # These two GatewayJudge preflight failures made no model request.
+                    if isinstance(error,RuntimeError) and str(error) in ('Gateway busy or unavailable for background review','Background model is not ready'):
+                        record.update(state='deferred',error_type=type(error).__name__)
+                        atomic(self.record_path(path.stem),encoded(record))
+                        return {'path':str(path),'state':'deferred'}
+                    return self._unresolved(path,record,error)
             with guard(self.brain):
-                _,_,_,fresh=self._input(record);require(fresh==input_hash,'stale_review','Inputs changed during review.',409)
+                try:
+                    accepted=self.vote(result,parts,sources,record['request_mode'])
+                    _,_,fresh=self._input(record)
+                    require(fresh==input_hash,'stale_review','Inputs changed during review.',409)
+                except Rejected as error:
+                    return self._return_issue(path,record,error,number)
+                except Exception as error:
+                    return self._unresolved(path,record,error)
+                passes.append(accepted)
+                record.update(review_passes=len(passes),passes=passes)
+                if number==2:
+                    state='reviewed_only' if record['request_mode']=='review_only' else 'approved'
+                    record.update(state=state,issues=[],return_count=0,reviewed_at=int(time.time()))
                 atomic(self.record_path(path.stem),encoded(record))
-            return {'path':str(path),'state':record['state'],'issues':record['issues']}
-        except Exception as error:
-            # No blind repeat after an accepted/unknown model request or interrupted process.
-            # Known read-only preflight busy/not-ready failures made no model request.
-            deferred=isinstance(error,RuntimeError) and str(error) in ('Gateway busy or unavailable for background review','Background model is not ready')
-            record.update(state='deferred' if deferred else 'review_unresolved',error_type=type(error).__name__)
-            with guard(self.brain):
-                if deferred:
-                    _,_,_,fresh=self._input(record);require(fresh==input_hash,'stale_review','Inputs changed before preflight deferral.',409)
-                atomic(self.record_path(path.stem),encoded(record))
-            return {'path':str(path),'state':'deferred' if deferred else 'review_unresolved'}
-        state='reviewed_only' if record['request_mode']=='review_only' else 'approved'
-        with guard(self.brain):
-            _,_,_,fresh=self._input(record);require(fresh==input_hash,'stale_review','Inputs changed during review.',409)
-            record.update(state=state,review_passes=2,passes=passes,input_hash=input_hash,issues=[],return_count=0,reviewed_at=int(time.time()))
-            atomic(self.record_path(path.stem),encoded(record))
-        return {'path':str(path),'state':state}
+        return {'path':str(path),'state':record['state']}
 
 
 def validate_automatic_approval(brain,operation,payload,client):
@@ -201,17 +253,31 @@ def validate_automatic_approval(brain,operation,payload,client):
     require(payload['request_id']==payload['origin_proposal_id'],'review_identity_mismatch','Automatic adoption must keep its registered proposal ID.',409)
     require(approval['host_policy_hash']==policy['host_policy_hash'],'review_policy_mismatch','Host policy differs.',409)
     record=reviewer.read_record(approval['proposal_id']);require(record is not None)
-    require(record['request_mode'] in ADOPTION_MODES and payload['project'] in policy['projects'],
-            'review_only_no_adoption','This review cannot authorize automatic adoption.',403)
+    require(record['request_mode'] in ADOPTION_MODES,
+            'review_only_no_adoption','This review cannot authorize adoption.',403)
     require(record['task_id']==approval['task_id'] and record['proposal_hash']==approval['proposal_hash'] and record['client_certificate_sha256']==client['certificate_sha256'],'review_identity_mismatch','Review owner/content differs.',409)
     require(approval['review_receipt_hash']==sha(encoded(record)),'stale_review','Review receipt differs.',409)
     if approval['provenance']=='human-reaffirmed-returned-decision':
-        require(record['request_mode']=='user_request' and record['state']=='returned' and record['return_count']==1 and isinstance(approval['reaffirmation_receipt_hash'],str) and re.fullmatch('[a-f0-9]{64}',approval['reaffirmation_receipt_hash']),'reaffirmation_required','Only a once-returned explicit request can be reaffirmed.',409)
+        issues=record.get('issues'); passes=record.get('passes',[])
+        require(record['state']=='returned' and type(record.get('return_count')) is int and record['return_count']==1
+                and isinstance(issues,list) and len(issues)==1 and isinstance(issues[0],dict)
+                and all(isinstance(issues[0].get(key),str) and issues[0][key].strip() for key in ('code','message'))
+                and isinstance(passes,list) and len(passes)<=1 and record['review_passes']==len(passes)
+                and isinstance(approval['reaffirmation_receipt_hash'],str) and re.fullmatch('[a-f0-9]{64}',approval['reaffirmation_receipt_hash']),
+                'reaffirmation_required','A once-returned review and a native reaffirmation receipt are required.',409)
         # The authenticated Windows Host owns the native-dialog human receipt. Never label this Reviewer PASS or FACT.
+        proposal=reviewer._bound_proposal(record)
+        if record.get('input_hash') is None:
+            require(not passes,'review_integrity','Successful review pass has no input binding.',409)
+            reviewer._sources(proposal['payload'],record['request_mode'])
+        else:
+            parts,sources,fresh=reviewer._input(record)
+            require(fresh==record['input_hash'],'stale_review','Sources changed after review.',409)
+            for vote in passes:reviewer.vote({'verdict':'approve','items':vote},parts,sources,record['request_mode'])
     else:
         expected='reviewer-approved-requested-decision' if record['request_mode']=='user_request' else 'reviewer-approved-model-proposal'
         require(approval['provenance']==expected and approval['reaffirmation_receipt_hash'] is None and record['state']=='approved' and record['review_passes']==2 and len(record.get('passes',[]))==2,'review_not_approved','Two validated Reviewer passes are required.',409)
-        _,parts,sources,fresh=reviewer._input(record);require(fresh==record['input_hash'],'stale_review','Sources changed after review.',409)
+        parts,sources,fresh=reviewer._input(record);require(fresh==record['input_hash'],'stale_review','Sources changed after review.',409)
         for vote in record['passes']:reviewer.vote({'verdict':'approve','items':vote},parts,sources,record['request_mode'])
     p=ApplyEngine(brain).path('log/approvals/'+approval['approval_id']+'.json',internal=True)
     require(not p.exists() and not ApplyEngine(brain).runtime_path('approval-consumptions/'+approval['approval_id']+'.json').exists(),'approval_used','Approval already consumed.',409)
