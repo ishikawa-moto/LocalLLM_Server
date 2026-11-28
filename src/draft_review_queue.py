@@ -9,7 +9,7 @@ import sys
 import time
 
 from draft_review import GatewayJudge, ReviewLease
-from decision_review import CombinedReviewer as DraftReviewer
+from decision_review import CombinedReviewer as DraftReviewer, DecisionReviewer
 from knowledge_guard import guard
 from knowledge_pipeline import atomic_json
 
@@ -81,6 +81,7 @@ def drain(brain, limit=16, seconds=300, reviewer=None, finalized=None):
             value = read_marker(brain)
             value.update(version=1, pending=True, launch_reserved_until=0)
             atomic_json(marker_path(brain), value)
+            DecisionReviewer(brain).reconcile_interrupted()
         stopped = False
         attempted = set()
         while True:
